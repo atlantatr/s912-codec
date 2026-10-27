@@ -1,12 +1,15 @@
 # S912 codec app - GitHub Actions APK build
 #
 # Her push/PR'da:
-#   1. Android NDK r25.1 + SDK 33 kurulur
+#   1. JDK 17 + Android SDK platform 33 + NDK r25b kurulur
 #   2. libsrt 1.5.3 + FFmpeg 6.1 arm64-v8a icin derlenir (prebuilt/)
 #   3. Gradle :app:assembleRelease -> debug anahtariyla imzali, kurulabilir APK
 #   4. APK "s912-codec-apk" artifact'i olarak yuklenir
 #
 # Gerekli secret yoktur. Repo public/private fark etmez.
+#
+# NOT: android-actions/setup-android@v3 bakimsiz kaldigi ve Node 20/24 +
+# Ubuntu 26 gecisinde kirildigi icin SDK/NDK burada dogrudan kurulur.
 name: Build APK
 
 on:
@@ -18,43 +21,93 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   NDK_VERSION: "25.1.8937325"
+  NDK_ZIP: "android-ndk-r25b-linux.zip"
   ANDROID_API: "33"
+  BUILD_TOOLS: "34.0.0"
 
 jobs:
   build-apk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # ubuntu-latest 2026'da Ubuntu 26'ya geciyor; toolchain'i sabitlemek icin 22.04.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
           cache: gradle
 
-      - name: Set up Android SDK + NDK + CMake
-        uses: android-actions/setup-android@v3
-        with:
-          packages: >-
-            platform-tools
-            platforms;android-${{ env.ANDROID_API }}
-            build-tools;34.0.0
-            ndk;${{ env.NDK_VERSION }}
-            cmake;3.22.1
-
-      - name: Export NDK paths + local.properties
+      - name: Locate Android SDK
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "SDK=$SDK"
+          ls -d "$SDK" 2>/dev/null || true
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+
+      - name: Install SDK packages (platform 33, build-tools)
+        run: |
+          set -euo pipefail
+          SDK="$ANDROID_SDK_ROOT"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKM" ]; then
+            echo "cmdline-tools yok, indiriliyor..."
+            curl -fsSL -o /tmp/cmdline.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            rm -rf /tmp/cmdline && mkdir -p /tmp/cmdline
+            unzip -q /tmp/cmdline.zip -d /tmp/cmdline
+            sudo mkdir -p "$SDK/cmdline-tools"
+            sudo rm -rf "$SDK/cmdline-tools/latest"
+            sudo mv /tmp/cmdline/cmdline-tools "$SDK/cmdline-tools/latest"
+            sudo chmod -R a+rX "$SDK/cmdline-tools"
+            rm -rf /tmp/cmdline /tmp/cmdline.zip
+          fi
+
+          if [ -w "$SDK" ]; then SUDO=""; else SUDO="sudo"; fi
+          yes | $SUDO "$SDKM" --sdk_root="$SDK" --licenses > /dev/null || true
+          $SUDO "$SDKM" --sdk_root="$SDK" \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;${BUILD_TOOLS}" \
+            "cmake;3.22.1"
+          ls "$SDK/platforms" "$SDK/build-tools"
+
+      - name: Install NDK r25b (${{ env.NDK_VERSION }})
+        run: |
+          set -euo pipefail
+          SDK="$ANDROID_SDK_ROOT"
+          NDK_DIR="$SDK/ndk/${NDK_VERSION}"
+
+          if [ ! -x "$NDK_DIR/ndk-build" ]; then
+            echo "NDK indiriliyor: ${NDK_ZIP}"
+            curl -fsSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/${NDK_ZIP}"
+            rm -rf /tmp/ndk && mkdir -p /tmp/ndk
+            unzip -q /tmp/ndk.zip -d /tmp/ndk
+            sudo mkdir -p "$SDK/ndk"
+            sudo rm -rf "$NDK_DIR"
+            sudo mv /tmp/ndk/android-ndk-r25b "$NDK_DIR"
+            sudo chmod -R a+rX "$NDK_DIR"
+            rm -rf /tmp/ndk /tmp/ndk.zip
+          fi
+
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+          "$NDK_DIR/ndk-build" --version
           {
-            echo "sdk.dir=$ANDROID_SDK_ROOT"
-            echo "ndk.dir=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+            echo "sdk.dir=$SDK"
+            echo "ndk.dir=$NDK_DIR"
           } > local.properties
           cat local.properties
 
