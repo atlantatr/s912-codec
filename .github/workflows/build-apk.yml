@@ -26,7 +26,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NDK_VERSION: "25.1.8937325"
+  NDK_VERSION: "25.1.8937393"
   NDK_ZIP: "android-ndk-r25b-linux.zip"
   ANDROID_API: "33"
   BUILD_TOOLS: "34.0.0"
@@ -104,11 +104,18 @@ jobs:
 
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+
+          # AGP, android.ndkVersion ile source.properties icindeki surumu karsilastirir.
+          REV=$(grep -E '^Pkg\.Revision' "$NDK_DIR/source.properties" | cut -d= -f2 | tr -d ' \r')
+          echo "NDK revision: $REV (beklenen: ${NDK_VERSION})"
+          if [ "$REV" != "${NDK_VERSION}" ]; then
+            echo "::error title=NDK::NDK surumu uyusmuyor: $REV != ${NDK_VERSION}"
+            exit 1
+          fi
+
           "$NDK_DIR/ndk-build" --version
-          {
-            echo "sdk.dir=$SDK"
-            echo "ndk.dir=$NDK_DIR"
-          } > local.properties
+          # ndk.dir bilerek yazilmiyor: AGP 8.x'te deprecated, sdk.dir/ndk/<surum> kullanilir.
+          echo "sdk.dir=$SDK" > local.properties
           cat local.properties
 
       # Ilk build uzun surer; sonraki build'lerde prebuilt cache'ten gelir.

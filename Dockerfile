@@ -18,11 +18,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Android NDK ---
-ENV NDK_VERSION=25.1.8937325
+ENV NDK_VERSION=25.1.8937393
+ENV NDK_ZIP=android-ndk-r25b-linux.zip
 ENV ANDROID_NDK=/opt/android/ndk/${NDK_VERSION}
-RUN wget -q "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -O /tmp/ndk.zip \
+RUN wget -q "https://dl.google.com/android/repository/${NDK_ZIP}" -O /tmp/ndk.zip \
     && unzip -q /tmp/ndk.zip -d /opt/android \
-    && mv "/opt/android/android-ndk-${NDK_VERSION}" "${ANDROID_NDK}" \
+    && mv /opt/android/android-ndk-r25b "${ANDROID_NDK}" \
     && rm /tmp/ndk.zip
 
 # --- Android SDK (cmdline-tools + platform + build-tools) ---

@@ -12,8 +12,8 @@ plugins {
 android {
     namespace "com.amlogic.codec"
     compileSdk 33
-    // CI'da 25.1.8937325; lokal testte -Ps912NdkVersion=... ile degistirilebilir.
-    ndkVersion project.findProperty("s912NdkVersion") ?: "25.1.8937325"
+    // CI'da 25.1.8937393; lokal testte -Ps912NdkVersion=... ile degistirilebilir.
+    ndkVersion project.findProperty("s912NdkVersion") ?: "25.1.8937393"
 
     defaultConfig {
         applicationId "com.amlogic.codec"

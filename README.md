@@ -29,7 +29,7 @@ tasarlanmıştır:
 |---|---|
 | JDK | 17 |
 | Android SDK | platform 33, build-tools 34.0.0 |
-| NDK | 25.1.8937325 |
+| NDK | 25.1.8937393 (r25b) |
 | CMake | 3.22.1 |
 | Gradle | 8.5 (wrapper dahil) |
 | AGP / Kotlin | 8.2.2 / 1.9.22 |
@@ -90,7 +90,7 @@ veriyorsa çalışır; aksi halde otomatik PCM'e döner.
 ## Yerel derleme
 
 ```bash
-export ANDROID_NDK=$HOME/Android/Sdk/ndk/25.1.8937325
+export ANDROID_NDK=$HOME/Android/Sdk/ndk/25.1.8937393
 
 # 1) Kaynaklar
 mkdir -p scripts/src

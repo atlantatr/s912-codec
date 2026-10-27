@@ -4,7 +4,7 @@
 #
 # Kullanim:
 #   git clone --depth 1 -b v1.5.3 https://github.com/Haivision/srt scripts/src/libsrt
-#   export ANDROID_NDK=$HOME/Android/Sdk/ndk/25.1.8937325
+#   export ANDROID_NDK=$HOME/Android/Sdk/ndk/25.1.8937393
 #   ./scripts/build_libsrt.sh
 #
 # Cikti:
@@ -14,10 +14,10 @@
 #
 set -euo pipefail
 
-NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/25.1.8937325}}"
+NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/25.1.8937393}}"
 if [ ! -d "$NDK" ]; then
   echo "HATA: NDK bulunamadi. ANDROID_NDK degiskenini kendi NDK yoluna ayarla."
-  echo "Ornek: export ANDROID_NDK=\$HOME/Android/Sdk/ndk/25.1.8937325"
+  echo "Ornek: export ANDROID_NDK=\$HOME/Android/Sdk/ndk/25.1.8937393"
   exit 1
 fi
 

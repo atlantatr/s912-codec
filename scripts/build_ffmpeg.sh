@@ -11,7 +11,7 @@
 #
 set -euo pipefail
 
-NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/25.1.8937325}}"
+NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/25.1.8937393}}"
 if [ ! -d "$NDK" ]; then
   echo "HATA: NDK bulunamadi. ANDROID_NDK degiskenini kur."
   exit 1
