@@ -34,6 +34,10 @@
 #include <thread>
 #include <vector>
 
+// FFmpeg 6.1 public headers are plain C and do NOT carry extern "C" guards.
+// Without this block the C++ compiler emits mangled symbols (e.g.
+// _Z14av_frame_allocv) and linking against the C static libs fails.
+extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
@@ -43,6 +47,7 @@
 #include <libavutil/mathematics.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
+}
 
 #define LOG_TAG "S912Codec"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
