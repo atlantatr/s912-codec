@@ -65,6 +65,11 @@ android {
             useLegacyPackaging = false
         }
     }
+    lint {
+        // Cihaz Android 7.1.2 (API 25) ve uygulama Play Store'a yuklenmiyor;
+        // targetSdk bilincli olarak 25. (Lint bunu "error" sayip build'i durduruyordu.)
+        disable 'ExpiredTargetSdkVersion'
+    }
 }
 
 dependencies {

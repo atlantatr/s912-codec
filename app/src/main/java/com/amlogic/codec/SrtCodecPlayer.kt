@@ -2,7 +2,9 @@ package com.amlogic.codec;
 
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -37,6 +39,40 @@ class SrtCodecPlayer {
             .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
             .build()
 
+    /**
+     * API 23+ icin AudioTrack.Builder, API 21/22 icin eski constructor.
+     * minSdk 21 korunur ve lint NewApi hatasi cikmaz.
+     */
+    @Suppress("DEPRECATION")
+    private fun createAudioTrack(
+        sampleRate: Int,
+        channelMask: Int,
+        encoding: Int,
+        bufferSize: Int
+    ): AudioTrack {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val cfg = AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(encoding)
+                .setChannelMask(channelMask)
+                .build()
+            return AudioTrack.Builder()
+                .setAudioAttributes(audioAttributes())
+                .setAudioFormat(cfg)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(bufferSize)
+                .build()
+        }
+        return AudioTrack(
+            AudioManager.STREAM_MUSIC,
+            sampleRate,
+            channelMask,
+            encoding,
+            bufferSize,
+            AudioTrack.MODE_STREAM
+        )
+    }
+
     fun open(url: String, sampleRate: Int = 0, channels: Int = 0): Boolean {
         return CodecBridge.nativeOpen(url, sampleRate, channels) == 0
     }
@@ -60,18 +96,12 @@ class SrtCodecPlayer {
         }
 
         try {
-            val cfg = AudioFormat.Builder()
-                .setSampleRate(48000)
-                .setEncoding(enc)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_5POINT1)
-                .build()
-
-            val at = AudioTrack.Builder()
-                .setAudioAttributes(audioAttributes())
-                .setAudioFormat(cfg)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(1024 * 1024)
-                .build()
+            val at = createAudioTrack(
+                sampleRate = 48000,
+                channelMask = AudioFormat.CHANNEL_OUT_5POINT1,
+                encoding = enc,
+                bufferSize = 1024 * 1024
+            )
 
             at.play()
             track = at
@@ -185,18 +215,12 @@ class SrtCodecPlayer {
         val bufSize = if (minBuf > 0) maxOf(minBuf, pcmBuf.size) else pcmBuf.size
 
         val at = try {
-            AudioTrack.Builder()
-                .setAudioAttributes(audioAttributes())
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(rate)
-                        .setChannelMask(chMask)
-                        .build()
-                )
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(bufSize)
-                .build()
+            createAudioTrack(
+                sampleRate = rate,
+                channelMask = chMask,
+                encoding = AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize = bufSize
+            )
         } catch (e: Exception) {
             Log.e(TAG, "PCM AudioTrack kurulamadi: ${e.message}")
             return
