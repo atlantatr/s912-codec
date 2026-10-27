@@ -157,7 +157,36 @@ jobs:
       - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          set -o pipefail
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee "$RUNNER_TEMP/gradle.log"
+
+      # Hata halinde ozeti hem is ozetine hem de check-run annotation'larina yaz.
+      # Boylece log indirmeye/token'a gerek kalmadan hata gorulebilir.
+      - name: Report Gradle failure
+        if: failure()
+        run: |
+          LOG="$RUNNER_TEMP/gradle.log"
+          [ -f "$LOG" ] || { echo "gradle.log yok"; exit 0; }
+
+          {
+            echo "## Gradle hata ozeti"
+            echo '```'
+            grep -n -E "FAILURE: Build failed|What went wrong|error:|undefined reference|CMake Error|Execution failed|Caused by|> Task .* FAILED|Could not|No such file" "$LOG" | tail -50 || true
+            echo '```'
+            echo "### Son 60 satir"
+            echo '```'
+            tail -60 "$LOG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          i=0
+          grep -E "What went wrong|error:|undefined reference|CMake Error|Execution failed|Caused by|Could not" "$LOG" \
+            | head -8 | while IFS= read -r line; do
+                esc=$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g')
+                echo "::error title=Gradle::${esc:0:900}"
+              done
+
+          tail -60 "$LOG"
 
       - name: Show APK
         run: ls -lh app/build/outputs/apk/release/
