@@ -11,5 +11,11 @@ local.properties
 prebuilt/
 app/jniLibs/
 
+# Klonlanan kaynaklar (scripts/build_*.sh tarafindan indirilir)
+scripts/src/
+
+# Native build ara ciktilari
+.cxx/
+
 # OS
 .DS_Store

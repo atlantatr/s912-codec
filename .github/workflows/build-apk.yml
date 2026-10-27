@@ -1,10 +1,12 @@
 # S912 codec app - GitHub Actions APK build
 #
-# Her push/PR'da: NDK ile FFmpeg + libsrt'yi arm64 icin derle,
-# gradle assembleRelease ile unsigned release APK uret, artifact olarak
-# yukle. Yerel kutuya `adb install` ile kurulur (platform imzasi gerekmez).
+# Her push/PR'da:
+#   1. Android NDK r25.1 + SDK 33 kurulur
+#   2. libsrt 1.5.3 + FFmpeg 6.1 arm64-v8a icin derlenir (prebuilt/)
+#   3. Gradle :app:assembleRelease -> debug anahtariyla imzali, kurulabilir APK
+#   4. APK "s912-codec-apk" artifact'i olarak yuklenir
 #
-# Gerekli repo ayari: "Secrets" ekleme gerekmez (public open-source derleme).
+# Gerekli secret yoktur. Repo public/private fark etmez.
 name: Build APK
 
 on:
@@ -13,14 +15,17 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Cache: gradle + ffmpeg/ffmpeg kaynak clone + libsrt
+permissions:
+  contents: read
+
 env:
   NDK_VERSION: "25.1.8937325"
+  ANDROID_API: "33"
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -33,59 +38,80 @@ jobs:
           java-version: 17
           cache: gradle
 
-      # ---- Android SDK + NDK ----
-      - name: Setup Android SDK
-        uses: android/setup-android@v4
+      - name: Set up Android SDK + NDK + CMake
+        uses: android-actions/setup-android@v3
         with:
-          ndk-version: ${{ env.NDK_VERSION }}
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_API }}
+            build-tools;34.0.0
+            ndk;${{ env.NDK_VERSION }}
+            cmake;3.22.1
 
-      # NDK yolunu gradle/local.properties'e bagla
-      - name: Write local.properties
+      - name: Export NDK paths + local.properties
         run: |
-          echo "ndk.dir=${ANDROID_NDK_HOME}" > local.properties
-          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          {
+            echo "sdk.dir=$ANDROID_SDK_ROOT"
+            echo "ndk.dir=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          } > local.properties
           cat local.properties
 
-      # ---- FFmpeg + libsrt kaynak clone + derle (arm64) ----
-      - name: Fetch FFmpeg source
+      # Ilk build uzun surer; sonraki build'lerde prebuilt cache'ten gelir.
+      - name: Cache prebuilt FFmpeg + libsrt
+        id: cache-prebuilt
+        uses: actions/cache@v4
+        with:
+          path: prebuilt
+          key: ${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ hashFiles('scripts/build_libsrt.sh', 'scripts/build_ffmpeg.sh') }}
+
+      - name: Fetch FFmpeg 6.1 source
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
         run: |
           mkdir -p scripts/src
-          git clone --depth 1 --branch n6.1 https://git.ffmpeg.org/ffmpeg.git scripts/src/ffmpeg-6.1
+          git clone --depth 1 --branch n6.1 \
+            https://github.com/FFmpeg/FFmpeg.git scripts/src/ffmpeg-6.1
 
-      - name: Fetch libsrt source
+      - name: Fetch libsrt 1.5.3 source
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch v1.5.3 https://github.com/Haivision/srt scripts/src/libsrt
+          mkdir -p scripts/src
+          git clone --depth 1 --branch v1.5.3 \
+            https://github.com/Haivision/srt.git scripts/src/libsrt
 
       - name: Build libsrt (arm64-v8a)
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
         run: |
-          export ANDROID_NDK="${ANDROID_NDK_HOME}"
           chmod +x scripts/build_libsrt.sh
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
           ./scripts/build_libsrt.sh
 
-      - name: Build FFmpeg (arm64-v8a)
+      - name: Build FFmpeg 6.1 (arm64-v8a)
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
         run: |
-          export ANDROID_NDK="${ANDROID_NDK_HOME}"
           chmod +x scripts/build_ffmpeg.sh
+          export ANDROID_NDK="$ANDROID_NDK_HOME"
           ./scripts/build_ffmpeg.sh
 
-      # libsrt.so'yu jniLibs'a kopyala
-      - name: Copy libsrt into jniLibs
+      - name: Verify prebuilt output
         run: |
-          mkdir -p app/jniLibs/arm64-v8a
-          cp prebuilt/lib/libsrt.so app/jniLibs/arm64-v8a/
+          test -f prebuilt/lib/libsrt.a
+          test -f prebuilt/ffmpeg/lib/libavformat.a
+          test -f prebuilt/ffmpeg/lib/libavcodec.a
+          ls -l prebuilt/lib prebuilt/ffmpeg/lib
 
-      # ---- Gradle build ----
-      - name: Build APK (release)
+      - name: Build release APK
         run: |
           chmod +x gradlew
           ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
-      - name: List APK
-        run: ls -la app/build/outputs/apk/release/
+      - name: Show APK
+        run: ls -lh app/build/outputs/apk/release/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: s912-codec-apk
-          path: app/build/outputs/apk/release/
-          if-not-exists: overwrite
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

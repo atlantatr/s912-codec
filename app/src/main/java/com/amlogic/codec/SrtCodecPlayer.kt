@@ -1,39 +1,24 @@
-package com.amlogic.codec
+package com.amlogic.codec;
 
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
-import android.os.Handler
-import android.os.Looper
-import android.view.Surface
-import java.io.File
-import java.io.FileOutputStream
-import kotlin.concurrent.thread
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+import android.view.Surface;
 
-/**
- * Audio cikiş rejimi - DVB/Dolby-DTS acgi icin kritik:
- *   - PCM_DECODE : FFmpeg decode -> s16 PCM -> AudioTrack (default, her zaman calisir)
- *   - PASS_THROUGH : ham AC3/EAC3/DTS/TrueHD bitstream -> AudioTrack offload
- *     (ENCODING_AC3 / DTS / EAC3 / TRUEHD). HDMI alici / Amlogic DSP
- *     bitstream'i dogrudan yutur; Dolby/DTS surunde bozulur.
- */
-enum class AudioMode { PCM_DECODE, PASS_THROUGH }
+import java.io.File;
+import java.io.FileOutputStream;
+
+import kotlin.concurrent.thread;
 
 /**
- * S912 / Android 7.1.2 icin SRT + AC3/EAC3/DTS/TrueHD/FLAC/Opus/WMA
- * audio player iskeleti.
+ * S912 / Android 7.1.2 icin SRT + AC3/EAC3/DTS/TrueHD/FLAC/Opus/WMA oynatici.
  *
- * - audio decode: native FFmpeg (codec_core.cpp)
- * - audio out:   AudioTrack (PCM, s16, stereo veya kaynagindaki layout)
- * - video decode: MediaCodec HW (S912 4K HEVC/H264) -> SurfaceView
- *
- * Kullanilimi:
- *   val p = SrtCodecPlayer()
- *   p.open("srt://192.168.1.50:9000?mode=caller")
- *   p.startVideo(surface)   // 4K HEVC HW decode Surface'e baslar
- *   p.start()               // audio dongusu
- *   ... p.stopVideo(); p.stop(); p.release()
+ * - Demux/decode: native FFmpeg (codec_core.cpp)
+ * - Audio out: AudioTrack (PCM) veya offload bitstream (AC3/EAC3/DTS/TrueHD)
+ * - Video: MediaCodec HW decode -> Surface
  */
 class SrtCodecPlayer {
 
@@ -43,120 +28,137 @@ class SrtCodecPlayer {
     private var track: AudioTrack? = null
     private var video: VideoDecoder? = null
 
-    private val pcmBuf = ByteArray(48000 * 2 * 2) // ~200ms stereo s16@48k
+    // 1 saniyelik stereo s16 @48k tampon.
+    private val pcmBuf = ByteArray(48000 * 2 * 2)
+
+    private fun audioAttributes(): AudioAttributes =
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+            .build()
 
     fun open(url: String, sampleRate: Int = 0, channels: Int = 0): Boolean {
-        val rc = CodecBridge.nativeOpen(url, sampleRate, channels)
-        return rc == 0
+        return CodecBridge.nativeOpen(url, sampleRate, channels) == 0
     }
 
     /**
-     * Video katmanini baslat: HEVC/H.264 detektasyonu + MediaCodec HW decode
-     * + SurfaceView'a baslama. 4K 10-bit / Dolby Vision profilleri S912 HW'de
-     * dekod edilir (OMX.AMLogic / c2.hevc).
-     */
-    /**
-     * Passthrough dongusu: audio, ffmpeg decode edilmez; AC3/EAC3/DTS/TrueHD
-     * bitstream'i dogrudan AudioTrack offload'a basilir (HDMI/Amlogic DSP).
-     * Dolby/DTS surround icin kullanilir.
+     * AC3/EAC3/DTS/TrueHD bitstream'i AudioTrack offload'a basar.
+     * Offload desteklenmiyorsa PCM decode'a duser.
      */
     fun startPassThrough() {
         if (CodecBridge.nativeCanPassThrough() == 0) {
-            // Passthrough yapilamaz, PCM'e don
-            start(); return
+            start()
+            return
         }
-        // FFmpeg 6.1 codec_id degerleri (libavcodec/codec_id.h):
-        //   AC3=87, EAC3=88, DTS=14, TRUEHD=13
+
         val enc = when (CodecBridge.nativeAudioCodecId()) {
-            87 -> AudioFormat.ENCODING_AC3       // AC3
-            88 -> AudioFormat.ENCODING_E_AC3     // EAC3
-            14 -> AudioFormat.ENCODING_DTS       // DTS / DTS-HD
-            13 -> AudioFormat.ENCODING_TRUEHD    // TrueHD
+            CodecBridge.CODEC_ID_AC3 -> AudioFormat.ENCODING_AC3
+            CodecBridge.CODEC_ID_EAC3 -> AudioFormat.ENCODING_E_AC3
+            CodecBridge.CODEC_ID_DTS -> AudioFormat.ENCODING_DTS
+            CodecBridge.CODEC_ID_TRUEHD -> AudioFormat.ENCODING_DOLBY_TRUEHD
             else -> AudioFormat.ENCODING_AC3
         }
-        val cfg = AudioFormat.Builder()
-            .setSampleRate(48000)
-            .setEncoding(enc)
-            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-            .build()
-        val at = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.DEFAULT)
-            .setAudioFormat(cfg)
-            .setBufferSizeInBytes(4 * 1024 * 1024) // bol, offload icin
-            .build()
-        at.play()
-        this.track = at
+
+        try {
+            val cfg = AudioFormat.Builder()
+                .setSampleRate(48000)
+                .setEncoding(enc)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_5POINT1)
+                .build()
+
+            val at = AudioTrack.Builder()
+                .setAudioAttributes(audioAttributes())
+                .setAudioFormat(cfg)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(1024 * 1024)
+                .build()
+
+            at.play()
+            track = at
+        } catch (e: Exception) {
+            Log.e(TAG, "passthrough AudioTrack kurulamadi: ${e.message}")
+            start()
+            return
+        }
+
         running = true
-        val buf = ByteArray(4 * 1024 * 1024)
+        val buf = ByteArray(1024 * 1024)
         playerThread = thread(name = "srt-passthrough") {
-            while (running) {
-                val n = CodecBridge.nativePollAudioPassThrough(buf)
-                if (n < 0) break
-                at.write(buf, 0, n.toInt())
+            try {
+                while (running) {
+                    val n = CodecBridge.nativePollAudioPassThrough(buf)
+                    if (n < 0) break
+                    if (n == 0L) {
+                        Thread.sleep(5)
+                        continue
+                    }
+                    track?.write(buf, 0, n.toInt())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "passthrough dongu hatasi: ${e.message}")
+            } finally {
+                running = false
+                handler.post {
+                    try { track?.stop() } catch (_: Exception) {}
+                    try { track?.release() } catch (_: Exception) {}
+                    track = null
+                }
             }
-            running = false
-            handler.post { at.release() }
         }
     }
 
     /**
-     * /dev/audiodsp0 fallback — 7.1.2 S912 kutusunda offload format
-     * (ENCODING_AC3/EAC3/DTS/TRUEHD) audio_policy icin kapaliysa,
-     * PCM offload da calismayabilir. Bu durumda Amlogic audio DSP
-     * dogrudan basilir (root / su ile):
-     *
-     *   1. audio out device init: echo 1 > /sys/class/amaudio/output_enable
-     *   2. raw out mode:    echo 1 > /sys/class/audiodsp/digital_raw
-     *   3. raw write:       > /dev/audiodsp0  (binary write, AC3/DTS/TrueHD
-     *                       bitstream boylu; 7.1'de kernel amaudio raw node
-     *                       bunu HDMI'e basar)
-     *
-     * Bu adim root / platform imzasi gerektirir (eski setin yaptigi seyin
-     * birebir yantisi). Offload calisiyorsa bu metodu cagirmayin,
-     * startPassThrough() kullanin.
+     * Root fallback: Amlogic /dev/audiodsp0 raw node.
+     * Offload AudioTrack kapali kutularda kullanilir.
      */
     fun startPassThroughRaw() {
-        // 1. output_enable (root)
         try {
             File("/sys/class/amaudio/output_enable").writeText("1\n")
-        } catch (_: Exception) {
-            // root/devel cagrisi; izin yoksa atla
-        }
-        // 2. digital_raw mod (root)
+        } catch (_: Exception) {}
         try {
             File("/sys/class/audiodsp/digital_raw").writeText("1\n")
         } catch (_: Exception) {}
-        // 3. /dev/audiodsp0'a binary write (root gerekli; su ile calisir)
+
         running = true
-        val buf = ByteArray(4 * 1024 * 1024)
+        val buf = ByteArray(1024 * 1024)
         playerThread = thread(name = "srt-passthrough-raw") {
             try {
-                val rawOut = FileOutputStream(File("/dev/audiodsp0"))
-                while (running) {
-                    val n = CodecBridge.nativePollAudioPassThrough(buf)
-                    if (n < 0) break
-                    rawOut.write(buf, 0, n.toInt())
-                    rawOut.flush()
+                FileOutputStream(File("/dev/audiodsp0")).use { rawOut ->
+                    while (running) {
+                        val n = CodecBridge.nativePollAudioPassThrough(buf)
+                        if (n < 0) break
+                        if (n == 0L) {
+                            Thread.sleep(5)
+                            continue
+                        }
+                        rawOut.write(buf, 0, n.toInt())
+                        rawOut.flush()
+                    }
                 }
-                rawOut.close()
             } catch (e: Exception) {
-                Log.e("S912Codec", "raw passthrough /dev/audiodsp0 hata: ${e.message}")
+                Log.e(TAG, "raw passthrough /dev/audiodsp0: ${e.message}")
+            } finally {
+                running = false
             }
-            running = false
         }
     }
 
     fun startVideo(surface: Surface) {
-        if (CodecBridge.nativeHasVideo() == 0) {
-            // audio-only kaynak, hic bir sey yapma
-            return
-        }
-        val cid = CodecBridge.nativeVideoCodecId()
-        val w = CodecBridge.nativeVideoWidth()
-        val h = CodecBridge.nativeVideoHeight()
+        if (CodecBridge.nativeHasVideo() == 0) return
+
         val vd = VideoDecoder()
-        vd.open(cid, w, h, surface)
-        this.video = vd
+        try {
+            vd.open(
+                CodecBridge.nativeVideoCodecId(),
+                CodecBridge.nativeVideoWidth(),
+                CodecBridge.nativeVideoHeight(),
+                surface
+            )
+            video = vd
+        } catch (e: Exception) {
+            Log.e(TAG, "video decoder acilamadi: ${e.message}")
+            vd.release()
+        }
     }
 
     fun stopVideo() {
@@ -164,35 +166,73 @@ class SrtCodecPlayer {
         video = null
     }
 
+    /** FFmpeg decode -> s16 PCM -> AudioTrack. */
     fun start() {
         if (running) return
-        running = true
-        val rate = if (CodecBridge.nativeAudioRate() == 0) 48000 else CodecBridge.nativeAudioRate()
-        val ch = if (CodecBridge.nativeAudioChannels() == 0) 2 else CodecBridge.nativeAudioChannels()
-        val chMask = if (ch > 2) AudioFormat.CHANNEL_MASK_5POINT1 else AudioFormat.CHANNEL_MASK_STEREO
-        val track = AudioTrack(
-            AudioManager.STREAM_MUSIC,
-            rate, AudioFormat.CHANNEL_OUT_MONO.let { chMask },
-            AudioFormat.ENCODING_PCM_16BIT,
-            pcmBuf.size, AudioTrack.MODE_STREAM,
-            AudioAttributes.DEFAULT
+
+        val rate = CodecBridge.nativeAudioRate().let { if (it <= 0) 48000 else it }
+        val ch = CodecBridge.nativeAudioChannels().let { if (it <= 0) 2 else it }
+        val chMask = when {
+            ch >= 8 -> AudioFormat.CHANNEL_OUT_7POINT1_SURROUND
+            ch >= 6 -> AudioFormat.CHANNEL_OUT_5POINT1
+            ch == 1 -> AudioFormat.CHANNEL_OUT_MONO
+            else -> AudioFormat.CHANNEL_OUT_STEREO
+        }
+
+        val minBuf = AudioTrack.getMinBufferSize(
+            rate, chMask, AudioFormat.ENCODING_PCM_16BIT
         )
-        track.play()
-        this.track = track
+        val bufSize = if (minBuf > 0) maxOf(minBuf, pcmBuf.size) else pcmBuf.size
+
+        val at = try {
+            AudioTrack.Builder()
+                .setAudioAttributes(audioAttributes())
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(rate)
+                        .setChannelMask(chMask)
+                        .build()
+                )
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(bufSize)
+                .build()
+        } catch (e: Exception) {
+            Log.e(TAG, "PCM AudioTrack kurulamadi: ${e.message}")
+            return
+        }
+
+        at.play()
+        track = at
+        running = true
+
         playerThread = thread(name = "srt-audio") {
-            while (running) {
-                val n = CodecBridge.nativePollAudioPcm(pcmBuf)
-                if (n < 0) break
-                track.write(pcmBuf, 0, n.toInt())
+            try {
+                while (running) {
+                    val n = CodecBridge.nativePollAudioPcm(pcmBuf)
+                    if (n < 0) break
+                    if (n == 0L) {
+                        Thread.sleep(5)
+                        continue
+                    }
+                    at.write(pcmBuf, 0, n.toInt())
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "audio dongu hatasi: ${e.message}")
+            } finally {
+                running = false
+                handler.post {
+                    try { track?.stop() } catch (_: Exception) {}
+                    try { track?.release() } catch (_: Exception) {}
+                    track = null
+                }
             }
-            running = false
-            handler.post { track?.stop(); track?.release(); track = null }
         }
     }
 
     fun stop() {
         running = false
-        playerThread?.join()
+        playerThread?.join(2000)
         playerThread = null
     }
 
@@ -200,5 +240,9 @@ class SrtCodecPlayer {
         stop()
         stopVideo()
         CodecBridge.nativeClose()
+    }
+
+    companion object {
+        private const val TAG = "S912Codec"
     }
 }

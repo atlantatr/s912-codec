@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# build_libsrt.sh - libsrt 1.5.x'i S912 / Android 7.1.2 (arm64-v8a) için derler
+# build_libsrt.sh - libsrt 1.5.x'i S912 / Android 7.1.2 (arm64-v8a) icin derler.
 #
-# Kullanım:
-#   1) scripts/indirs/ klasorune libsrt-1.5.3.tar.gz indir
-#      (git clone https://github.com/Haivision/srt || tag v1.5.3)
-#   2) ./build_libsrt.sh
+# Kullanim:
+#   git clone --depth 1 -b v1.5.3 https://github.com/Haivision/srt scripts/src/libsrt
+#   export ANDROID_NDK=$HOME/Android/Sdk/ndk/25.1.8937325
+#   ./scripts/build_libsrt.sh
 #
-# Gerekli ortam (Android Studio ayarladıysan genelde otomatik):
-#   ANDROID_NDK  -> NDK dizini (r23+ veya r25+ / 23.x / 25.x)
-# NDK r25+ ise API 21+ icin cicc yerine clang kullanilir, bu sorun degil.
-# min API 21 tutulur cunku S912 kutulari standart su 7.1 (API 25).
+# Cikti:
+#   prebuilt/lib/libsrt.a
+#   prebuilt/include/srt/*.h
+#   prebuilt/lib/pkgconfig/srt.pc
 #
 set -euo pipefail
 
-NDK="${ANDROID_NDK:-$HOME/Android/Sdk/ndk/25.1.8937325}"
+NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/25.1.8937325}}"
 if [ ! -d "$NDK" ]; then
   echo "HATA: NDK bulunamadi. ANDROID_NDK degiskenini kendi NDK yoluna ayarla."
   echo "Ornek: export ANDROID_NDK=\$HOME/Android/Sdk/ndk/25.1.8937325"
@@ -23,43 +23,58 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SRC="$ROOT/scripts/src/libsrt"          # libsrt-1.5.3 kaynak dizini
-OUT="$ROOT/prebuilt"                    # cikiş: prebuilt/{libsrt,ffmpeg,include,lib}
+SRC="$ROOT/scripts/src/libsrt"
+OUT="$ROOT/prebuilt"
 
 API=21
 ARCH="aarch64-linux-android"
-TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$(uname -s | tr 'A-Z' 'a-z')-x86_64"
+case "$(uname -s)" in
+  Linux*)   HOST_TAG="linux-x86_64" ;;
+  Darwin*)  HOST_TAG="darwin-x86_64" ;;
+  MINGW*|MSYS*|CYGWIN*) HOST_TAG="windows-x86_64" ;;
+  *)        HOST_TAG="$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64" ;;
+esac
+TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG"
 CC="$TOOLCHAIN/bin/${ARCH}${API}-clang"
 CXX="$TOOLCHAIN/bin/${ARCH}${API}-clang++"
 
 if [ ! -d "$SRC" ]; then
   echo "HATA: $SRC bulunamadi."
-  echo "libsrt-1.5.3 kaynagini oraya koy (git clone -b v1.5.3 https://github.com/Haivision/srt $SRC)"
+  echo "git clone --depth 1 -b v1.5.3 https://github.com/Haivision/srt $SRC"
+  exit 1
+fi
+if [ ! -x "$CC" ]; then
+  echo "HATA: NDK clang bulunamadi: $CC"
   exit 1
 fi
 
-rm -rf "$OUT/build"
+rm -rf "$OUT/build/libsrt"
 mkdir -p "$OUT/build/libsrt" "$OUT/lib" "$OUT/include"
 
 cd "$OUT/build/libsrt"
 cmake "$SRC" \
+  -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-$API \
+  -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$OUT" \
-  -DSRT_ENABLE_ENCRYPTION=ON \
-  -DSRT_ENABLE_UHDMABUF=OFF \
-  -DSRT_TRANSMIT_DATA_EXT=ON \
+  -DCMAKE_INSTALL_LIBDIR=lib \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-  -DCMAKE_SHARED_LIBRARY_RPATH_LINK_FLAG="" \
-  -DCMAKE_C_COMPILER="$CC" \
-  -DCMAKE_CXX_COMPILER="$CXX" \
-  -DCMAKE_INSTALL_LIBDIR=lib
-make -j"$(nproc)"
-make install
+  -DENABLE_SHARED=OFF \
+  -DENABLE_STATIC=ON \
+  -DENABLE_APPS=OFF \
+  -DENABLE_TESTING=OFF \
+  -DENABLE_UNITTESTS=OFF \
+  -DENABLE_ENCRYPTION=OFF \
+  -DENABLE_CXX_DEPS=OFF \
+  -DUSE_STATIC_LIBSTDCXX=OFF
+
+cmake --build . --parallel "$(nproc 2>/dev/null || echo 4)"
+cmake --install .
 
 echo ""
-echo "OK -> libsrt:  $OUT/lib/libsrt$(command -v go >/dev/null 2>&1 && echo .so || echo .so)"
+echo "OK -> libsrt: $OUT/lib/libsrt.a"
 ls -l "$OUT/lib" | grep -i srt || true
-echo "Libs srt kuruldu. Sonraki adim: ./build_ffmpeg.sh"
+echo "Sonraki adim: ./scripts/build_ffmpeg.sh"

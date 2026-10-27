@@ -1,27 +1,23 @@
-package com.amlogic.codec
+package com.amlogic.codec;
 
-import android.app.Activity
-import android.os.Bundle
-import android.view.Gravity
-import android.view.SurfaceHolder
-import android.view.Surface
-import android.view.View
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.widget.EditText
+import android.app.Activity;
+import android.os.Bundle;
+import android.view.Gravity;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 /**
- * "4K CI" oynatici iskeleti - SRT + 4K HEVC (S912 HW decode).
+ * SRT / DVB oynatici iskeleti - 4K HEVC (S912 HW decode).
  *
- * Yerlesim:
- *   FrameLayout (MATCH x MATCH)
- *   ├─ SurfaceView   <- 4K HEVC / H264 HW decode (MediaCodec -> Surface)
- *   └─ LinearLayout (alt panel, URL + Play/Stop + status)
- *
- * 7.1.2 / S912 icin: HW HEVC decode MediaCodec ("c2.hevc" / "OMX.AMLogic.hevc.decode")
- * - S912, 4K HEVC 10-bit + Dolby Vision (profil 5/8) destekler
+ * FrameLayout
+ *   +-- SurfaceView          (MediaCodec HW decode)
+ *   +-- alt panel (URL, Play/Stop, Passthrough/PCM, durum)
  */
 class CodecActivity : Activity() {
 
@@ -32,14 +28,17 @@ class CodecActivity : Activity() {
     private lateinit var btnPlay: Button
     private lateinit var btnStop: Button
     private lateinit var btnPass: Button
-    private var usePass = true   // DVB/Dolby-DOS icin default passthrough
+
+    private var usePass = true
     private var surface: Surface? = null
 
     private val holderCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
             surface = holder.surface
         }
+
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {}
+
         override fun surfaceDestroyed(holder: SurfaceHolder) {
             surface = null
         }
@@ -49,34 +48,49 @@ class CodecActivity : Activity() {
         super.onCreate(savedInstanceState)
         player = SrtCodecPlayer()
 
-        sv = SurfaceView(this)
+        sv = android.view.SurfaceView(this)
         sv.holder.addCallback(holderCallback)
+        sv.setKeepScreenOn(true)
+
         val videoLayer = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER)
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            Gravity.CENTER
+        )
 
-        val panel = LinearLayout(this)
-        panel.orientation = LinearLayout.VERTICAL
-        panel.setPadding(32, 0, 32, 32)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 24)
+        }
 
-        tvStatus = TextView(this)
-        tvStatus.text = "Hazir. SRT URL yaz ve Play."
+        tvStatus = TextView(this).apply {
+            text = "Hazir. SRT URL yaz ve Play."
+        }
         panel.addView(tvStatus)
 
-        etUrl = EditText(this)
-        etUrl.hint = "srt://192.168.1.50:9000?mode=caller"
+        etUrl = EditText(this).apply {
+            hint = "srt://192.168.1.50:9000?mode=caller"
+            setSingleLine(true)
+        }
         panel.addView(etUrl)
 
-        // DVB/Dolby-DTS icin passthrough switch (PCM <--> PassThrough)
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        btnPlay = Button(this); btnPlay.text = "Play"
-        btnStop = Button(this); btnStop.text = "Stop"; btnStop.isEnabled = false
-        btnPass = Button(this); btnPass.text = "Passthrough"
-        btnPass.setOnClickListener {
-            usePass = !usePass
-            btnPass.text = if (usePass) "PCM" else "Passthrough"
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
         }
+
+        btnPlay = Button(this).apply { text = "Play" }
+        btnStop = Button(this).apply {
+            text = "Stop"
+            isEnabled = false
+        }
+        btnPass = Button(this).apply {
+            text = "Mode: Passthrough"
+            setOnClickListener {
+                usePass = !usePass
+                text = if (usePass) "Mode: Passthrough" else "Mode: PCM"
+            }
+        }
+
         row.addView(btnPlay)
         row.addView(btnStop)
         row.addView(btnPass)
@@ -84,46 +98,57 @@ class CodecActivity : Activity() {
 
         val root = FrameLayout(this)
         root.addView(sv, videoLayer)
-        root.addView(panel, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM).apply {
-            setMargins(0, 0, 0, 48)
-            setPadding(48, 24, 48, 24)
-        })
+        root.addView(
+            panel,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            ).apply {
+                setMargins(0, 0, 0, 24)
+            }
+        )
 
         btnPlay.setOnClickListener { onPlay() }
-        btnStop.setOnClickListener { onStop() }
+        btnStop.setOnClickListener { stopPlayback() }
 
         setContentView(root)
     }
 
     private fun onPlay() {
         val url = etUrl.text.toString().trim()
-        if (url.isEmpty()) { tvStatus.text = "URL bos."; return }
+        if (url.isEmpty()) {
+            tvStatus.text = "URL bos."
+            return
+        }
+
         tvStatus.text = "Aciyor: $url"
-        if (!player.open(url)) { tvStatus.text = "Acilamadi (SRT/demuxer hata)."; return }
+        if (!player.open(url)) {
+            tvStatus.text = "Acilamadi (SRT/demuxer hatasi)."
+            return
+        }
 
         val s = surface
         if (s != null) {
-            player.startVideo(s)   // 4K HEVC HW decode -> Surface
-            tvStatus.text = "Video: HW decode (S912) $url"
+            player.startVideo(s)
+            tvStatus.text = "Video: HW decode - $url"
         } else {
             tvStatus.text = "Sadece audio (Surface hazir degil)"
         }
-        // Audio: passthrough (DVB/Dolby-DTS) veya PCM decode
+
         if (usePass) {
             player.startPassThrough()
-            tvStatus.text = "Audio: passthrough (offload) - $url"
+            tvStatus.text = "Audio: passthrough - $url"
         } else {
             player.start()
             tvStatus.text = "Audio: PCM decode - $url"
         }
+
         btnPlay.isEnabled = false
         btnStop.isEnabled = true
     }
 
-    private fun onStop() {
+    private fun stopPlayback() {
         player.release()
         tvStatus.text = "Durduruldu."
         btnPlay.isEnabled = true

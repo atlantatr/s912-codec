@@ -4,21 +4,10 @@ import android.util.Log
 import kotlin.concurrent.thread
 
 /**
- * DVB / CIx besleme -> FFmpeg demuxer'a TS byte besleme katmani.
+ * DVB / CIx -> FFmpeg mpegts feed.
  *
- * Iki ihtimali birlestirir:
- *   1. /dev/dvb (tuner karti, DVB-S2)   -> DvbFrontend.nativeDvbPollTS
- *   2. CIx (CI slotundan TS)            -> DvbFrontend.nativeCixPoll
- *
- * Cikan 188-byte TS paketleri, codec_core.cpp'deki custom avio (TS feed
- * modu) uzerinden FFmpeg mpegts demuxer'a basilir. Boylece audio /
- * passthrough / video katmanlari DVB kaynagindan da calisir.
- *
- * Kullanilim:
- *   val src = DvbSource()
- *   src.openTuner(frontend=0, freqHz=11330_000_000, polH=true, sr=29700)
- *   src.start()           // -> CodecBridge TS feed dongusu
- *   ... src.stop(); src.release()
+ * 188-byte TS paketleri /dev/dvb/.../dvr0 veya /dev/ciN'den okunur,
+ * CodecBridge.nativeFeedTSBytes ile native demuxer'a basilir.
  */
 class DvbSource {
 
@@ -28,68 +17,89 @@ class DvbSource {
     private var ciFd = -1
     private var pumpThread: Thread? = null
     private var running = false
-    private val buf = ByteArray(188 * 188) // ~32KB, bol
+    private val buf = ByteArray(188 * 188)
 
     /**
-     * Tuner'i ac + tune et. SRT/CIx demuxer'a TS feed modu acilir.
-     * @return 0 baarili, <0 basarisiz
+     * Tuner'i ac + DVB-S2 tune et ve FFmpeg feed modunu baslat.
+     *
+     * @param freqHz  transponder frekansi (Hz, ornek 11330000000)
+     * @param loFreq  LNB low-band LO (Hz, 9750000000)
+     * @param hiFreq  LNB high-band LO (Hz, 10600000000)
      */
-    fun openTuner(frontend: Int = 0, freqHz: Long, polH: Boolean,
-                  loFreq: Long = 9_750_000, hiFreq: Long = 10_600_000,
-                  sr: Int = 29700, fecNum: Int = 7, fecDen: Int = 8): Boolean {
+    fun openTuner(
+        frontend: Int = 0,
+        freqHz: Long,
+        polH: Boolean,
+        loFreq: Long = 9_750_000_000L,
+        hiFreq: Long = 10_600_000_000L,
+        sr: Int = 29700,
+        fecNum: Int = 7,
+        fecDen: Int = 8
+    ): Boolean {
         kind = Kind.TUNER
         if (DvbFrontend.nativeDvbOpen(frontend) != 0) return false
-        if (DvbFrontend.nativeDvbTuneS2(freqHz, polH, loFreq, hiFreq, sr, fecNum, fecDen) != 0)
+        if (DvbFrontend.nativeDvbTuneS2(freqHz, polH, loFreq, hiFreq, sr, fecNum, fecDen) != 0) {
+            DvbFrontend.nativeDvbClose()
             return false
-        CodecBridge.nativeOpenTSFeed("mpegts") // demuxer'i feed moduna al
-        return true
+        }
+        return CodecBridge.nativeOpenTSFeed("mpegts") == 0
     }
 
-    /**
-     * CIx beslemesini ac (CI slotundan TS).
-     */
     fun openCix(slot: Int = 0): Boolean {
         kind = Kind.CIX
         ciFd = DvbFrontend.nativeCixOpen(slot)
         if (ciFd < 0) return false
-        CodecBridge.nativeOpenTSFeed("mpegts")
-        return true
+        return CodecBridge.nativeOpenTSFeed("mpegts") == 0
     }
 
-    /** DVB/CIx'den TS cek, FFmpeg demuxer'a bas (pump dongusu). */
     fun start() {
         if (running) return
         running = true
+
         pumpThread = thread(name = "dvb-feed") {
-            while (running) {
-                val n = if (kind == Kind.TUNER)
-                    DvbFrontend.nativeDvbPollTS(buf)
-                else
-                    DvbFrontend.nativeCixPoll(ciFd, buf)
-                if (n <= 0) {
-                    // kaynak hicbir sey vermiyor; kisa bekle, henuz sinyal yok
-                    try { Thread.sleep(50) } catch (_: InterruptedException) { break }
-                    continue
+            try {
+                while (running) {
+                    val n = if (kind == Kind.TUNER) {
+                        DvbFrontend.nativeDvbPollTS(buf)
+                    } else {
+                        DvbFrontend.nativeCixPoll(ciFd, buf)
+                    }
+
+                    if (n <= 0) {
+                        Thread.sleep(50)
+                        continue
+                    }
+
+                    CodecBridge.nativeFeedTSBytes(buf.copyOfRange(0, n.toInt()))
                 }
-                CodecBridge.nativeFeedTSBytes(buf.copyOfRange(0, n.toInt()))
+            } catch (e: InterruptedException) {
+                Log.i(TAG, "dvb feed durduruldu")
+            } catch (e: Exception) {
+                Log.e(TAG, "dvb feed hatasi: ${e.message}")
+            } finally {
+                running = false
             }
-            running = false
         }
     }
 
     fun stop() {
         running = false
-        pumpThread?.join()
+        pumpThread?.join(2000)
         pumpThread = null
     }
 
     fun release() {
         stop()
         if (kind == Kind.CIX && ciFd >= 0) {
-            DvbFrontend.nativeCixClose(ciFd); ciFd = -1
+            DvbFrontend.nativeCixClose(ciFd)
+            ciFd = -1
         } else {
             DvbFrontend.nativeDvbClose()
         }
         CodecBridge.nativeCloseTSFeed()
+    }
+
+    companion object {
+        private const val TAG = "S912Dvb"
     }
 }
