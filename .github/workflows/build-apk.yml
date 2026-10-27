@@ -1,0 +1,91 @@
+# S912 codec app - GitHub Actions APK build
+#
+# Her push/PR'da: NDK ile FFmpeg + libsrt'yi arm64 icin derle,
+# gradle assembleRelease ile unsigned release APK uret, artifact olarak
+# yukle. Yerel kutuya `adb install` ile kurulur (platform imzasi gerekmez).
+#
+# Gerekli repo ayari: "Secrets" ekleme gerekmez (public open-source derleme).
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+# Cache: gradle + ffmpeg/ffmpeg kaynak clone + libsrt
+env:
+  NDK_VERSION: "25.1.8937325"
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      # ---- Android SDK + NDK ----
+      - name: Setup Android SDK
+        uses: android/setup-android@v4
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      # NDK yolunu gradle/local.properties'e bagla
+      - name: Write local.properties
+        run: |
+          echo "ndk.dir=${ANDROID_NDK_HOME}" > local.properties
+          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+          cat local.properties
+
+      # ---- FFmpeg + libsrt kaynak clone + derle (arm64) ----
+      - name: Fetch FFmpeg source
+        run: |
+          mkdir -p scripts/src
+          git clone --depth 1 --branch n6.1 https://git.ffmpeg.org/ffmpeg.git scripts/src/ffmpeg-6.1
+
+      - name: Fetch libsrt source
+        run: |
+          git clone --depth 1 --branch v1.5.3 https://github.com/Haivision/srt scripts/src/libsrt
+
+      - name: Build libsrt (arm64-v8a)
+        run: |
+          export ANDROID_NDK="${ANDROID_NDK_HOME}"
+          chmod +x scripts/build_libsrt.sh
+          ./scripts/build_libsrt.sh
+
+      - name: Build FFmpeg (arm64-v8a)
+        run: |
+          export ANDROID_NDK="${ANDROID_NDK_HOME}"
+          chmod +x scripts/build_ffmpeg.sh
+          ./scripts/build_ffmpeg.sh
+
+      # libsrt.so'yu jniLibs'a kopyala
+      - name: Copy libsrt into jniLibs
+        run: |
+          mkdir -p app/jniLibs/arm64-v8a
+          cp prebuilt/lib/libsrt.so app/jniLibs/arm64-v8a/
+
+      # ---- Gradle build ----
+      - name: Build APK (release)
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: List APK
+        run: ls -la app/build/outputs/apk/release/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: s912-codec-apk
+          path: app/build/outputs/apk/release/
+          if-not-exists: overwrite

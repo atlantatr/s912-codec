@@ -1,0 +1,59 @@
+//
+// build.gradle - S912 codec app (Android 7.1.2 / API 25, min 21)
+//
+// Kurulum oncesi:
+//   1. prebuilt/ klasoru: scripts/build_libsrt.sh + scripts/build_ffmpeg.sh
+//      caltilmis (yoksa Dockerfile/CI otomatik derler)
+//   2. app/jniLibs/arm64-v8a/ icine prebuilt/lib/libsrt.so kopyalanmis
+//
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// prebuilt root: proje root/parent'unde olmasi beklenir
+def prebuiltDir = file("${rootDir}/prebuilt")
+
+android {
+    namespace "com.amlogic.codec"
+    compileSdk 33
+    defaultConfig {
+        applicationId "com.amlogic.codec"
+        minSdk 21
+        targetSdk 25
+        versionCode 1
+        versionName "1.0"
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_ABI=arm64-v8a"
+                abiFilters "arm64-v8a"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            // CI/yerel release icin debug imzasi (platform imzasi gerekmez)
+            signingConfig signingConfigs.debug
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions { jvmTarget = "1.8" }
+    sourceSets {
+        main { jniLibs.srcDirs = ["jniLibs"] }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.9.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+}

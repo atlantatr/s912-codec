@@ -1,0 +1,15 @@
+# Gradle / IDE
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+.kotlin/
+
+# Prebuilt (CI'da otomatik derlenir, git'e girmesin)
+prebuilt/
+app/jniLibs/
+
+# OS
+.DS_Store
