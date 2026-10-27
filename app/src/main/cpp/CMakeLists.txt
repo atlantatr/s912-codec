@@ -58,3 +58,10 @@ target_compile_options(codec_core PRIVATE
     -Wextra
     -Wno-unused-parameter
 )
+
+# FFmpeg'in aarch64 tx assembly'si (libavutil/aarch64/tx_float_neon.S) C tarafinda
+# tanimli global tablolara adrp/add ile referans verir. Semboller default
+# visibility ile export edilirse lld "relocation ... cannot be used ... recompile
+# with -fPIC" hatasi verir. Statik kutuphane sembollerini hidden yapinca hem bu
+# cozulur hem de .so'nun export tablosu kuculur.
+target_link_options(codec_core PRIVATE -Wl,--exclude-libs,ALL)

@@ -119,9 +119,9 @@ jobs:
           cat local.properties
 
       # Ilk build uzun surer; sonraki build'lerde prebuilt cache'ten gelir.
-      - name: Cache prebuilt FFmpeg + libsrt
+      - name: Restore prebuilt FFmpeg + libsrt
         id: cache-prebuilt
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: prebuilt
           key: ${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ hashFiles('scripts/build_libsrt.sh', 'scripts/build_ffmpeg.sh') }}
@@ -160,6 +160,14 @@ jobs:
           test -f prebuilt/ffmpeg/lib/libavformat.a
           test -f prebuilt/ffmpeg/lib/libavcodec.a
           ls -l prebuilt/lib prebuilt/ffmpeg/lib
+
+      # Gradle basarisiz olsa bile prebuilt cache'e yazilsin (sonraki denemeler hizli).
+      - name: Save prebuilt cache
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: prebuilt
+          key: ${{ runner.os }}-ndk${{ env.NDK_VERSION }}-${{ hashFiles('scripts/build_libsrt.sh', 'scripts/build_ffmpeg.sh') }}
 
       - name: Build release APK
         run: |
