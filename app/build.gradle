@@ -40,11 +40,22 @@ android {
         }
     }
 
+    // Sabit imza anahtari: her CI derlemesi ayni imzayi tasir, boylece
+    // "INSTALL_FAILED_UPDATE_INCOMPATIBLE" olmadan uzerine kurulabilir.
+    // (Sadece bu uygulama icin; sir degil, bilerek repoda.)
+    signingConfigs {
+        stable {
+            storeFile file("../keystore/s912-codec.jks")
+            storePassword "s912codec"
+            keyAlias "s912codec"
+            keyPassword "s912codec"
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            // Debug imzasi: platform imzasi/keystore secret'i gerekmeden kurulabilir APK.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.stable
         }
     }
 
