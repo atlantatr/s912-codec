@@ -30,6 +30,7 @@ class CodecActivity : Activity() {
     private lateinit var btnPlay: Button
     private lateinit var btnStop: Button
     private lateinit var btnPass: Button
+    private lateinit var btnDvb: Button
 
     private var usePass = true
     private var surface: Surface? = null
@@ -95,9 +96,15 @@ class CodecActivity : Activity() {
             }
         }
 
+        btnDvb = Button(this).apply {
+            text = "TV: TRT 4K"
+            setOnClickListener { onPlayDvb() }
+        }
+
         row.addView(btnPlay)
         row.addView(btnStop)
         row.addView(btnPass)
+        row.addView(btnDvb)
         panel.addView(row)
 
         val root = FrameLayout(this)
@@ -158,6 +165,38 @@ class CodecActivity : Activity() {
         return "$prefix\nDijital cikis: $mode$avail"
     }
 
+    /**
+     * TRT 4K (Turksat 42.0E, 11767 V, SR 15000).
+     * Tuner islemi kilit bekledigi icin arka planda yapilir.
+     */
+    private fun onPlayDvb() {
+        val freq = 11_767_000_000L
+        val sr = 15000
+        lastUrl = "DVB-S2 11767 V $sr (TRT 4K)"
+        tvStatus.text = "TV: tune ediliyor..."
+        btnPlay.isEnabled = false
+        btnDvb.isEnabled = false
+        btnStop.isEnabled = true
+
+        Thread {
+            val ok = player.openDvb(freq, true, sr)
+            ui.post {
+                if (isFinishing) return@post
+                if (!ok) {
+                    tvStatus.text = "TV: kilit yok / akis gelmedi (11767 V $sr)"
+                    btnPlay.isEnabled = true
+                    btnDvb.isEnabled = true
+                    btnStop.isEnabled = false
+                    return@post
+                }
+                surface?.let { player.startVideo(it) }
+                if (usePass) player.startPassThrough() else player.start()
+                ui.removeCallbacks(statusTick)
+                ui.post(statusTick)
+            }
+        }.start()
+    }
+
     private fun onPlay() {
         val url = etUrl.text.toString().trim()
         if (url.isEmpty()) {
@@ -205,6 +244,7 @@ class CodecActivity : Activity() {
         player = SrtCodecPlayer()   // release() native baglami kapatir, yeniden kullanilamaz
         tvStatus.text = audioStatus("Durduruldu.")
         btnPlay.isEnabled = true
+        btnDvb.isEnabled = true
         btnStop.isEnabled = false
     }
 

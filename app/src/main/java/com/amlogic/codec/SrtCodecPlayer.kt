@@ -29,6 +29,7 @@ class SrtCodecPlayer {
     private var running = false
     private var track: AudioTrack? = null
     private var video: VideoDecoder? = null
+    private var dvb: DvbSource? = null
 
     /** digital_raw'in bizim degistirmeden onceki degeri (-1 = bilinmiyor). */
     private var rawPrevious = -1
@@ -78,6 +79,59 @@ class SrtCodecPlayer {
 
     fun open(url: String, sampleRate: Int = 0, channels: Int = 0): Boolean {
         return CodecBridge.nativeOpen(url, sampleRate, channels) == 0
+    }
+
+    /**
+     * DVB-S/S2 kanalini ac: tuner -> TS feed -> FFmpeg demux.
+     * Akis gelene kadar (PAT/PMT + ilk paketler) bekler.
+     *
+     * @param freqHz transponder frekansi (Hz), ornek 11_767_000_000
+     * @param srKsym symbol rate (kSym/s), ornek 15000
+     */
+    fun openDvb(
+        freqHz: Long,
+        polH: Boolean,
+        srKsym: Int,
+        adapter: Int = 0,
+        fecNum: Int = 2,
+        fecDen: Int = 3
+    ): Boolean {
+        releaseDvb()
+        val d = DvbSource()
+        dvb = d
+        if (!d.openTuner(
+                frontend = adapter,
+                freqHz = freqHz,
+                polH = polH,
+                sr = srKsym,
+                fecNum = fecNum,
+                fecDen = fecDen
+        )) {
+            Log.e(TAG, "DVB acilamadi (freq=$freqHz sr=$srKsym adapter=$adapter)")
+            dvb = null
+            return false
+        }
+        d.start()
+
+        // FFmpeg'in PAT/PMT okuyup codec'leri bulmasi icin bekle.
+        var waited = 0
+        while (waited < 8000) {
+            if (CodecBridge.nativeAudioRate() > 0 || CodecBridge.nativeHasVideo() != 0) {
+                Log.i(TAG, "DVB akis hazir (${waited} ms): video=${CodecBridge.nativeHasVideo()} " +
+                        "audio=${CodecBridge.nativeAudioRate()}Hz/${CodecBridge.nativeAudioChannels()}ch " +
+                        "codec=${CodecBridge.nativeAudioCodecId()}")
+                return true
+            }
+            Thread.sleep(100)
+            waited += 100
+        }
+        Log.e(TAG, "DVB akis hazir olmadi (${waited} ms)")
+        return false
+    }
+
+    private fun releaseDvb() {
+        dvb?.release()
+        dvb = null
     }
 
     /**
@@ -298,6 +352,7 @@ class SrtCodecPlayer {
     fun release() {
         stop()
         stopVideo()
+        releaseDvb()
         CodecBridge.nativeClose()
     }
 

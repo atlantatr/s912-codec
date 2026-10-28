@@ -37,11 +37,16 @@ class DvbSource {
         fecDen: Int = 8
     ): Boolean {
         kind = Kind.TUNER
-        if (DvbFrontend.nativeDvbOpen(frontend) != 0) return false
+        if (DvbFrontend.nativeDvbOpen(frontend) != 0) {
+            Log.e(TAG, "dvb open basarisiz (adapter=$frontend)")
+            return false
+        }
         if (DvbFrontend.nativeDvbTuneS2(freqHz, polH, loFreq, hiFreq, sr, fecNum, fecDen) != 0) {
+            Log.e(TAG, "tune basarisiz (freq=$freqHz sr=$sr)")
             DvbFrontend.nativeDvbClose()
             return false
         }
+        Log.i(TAG, "tune ok, kilit var")
         return CodecBridge.nativeOpenTSFeed("mpegts") == 0
     }
 

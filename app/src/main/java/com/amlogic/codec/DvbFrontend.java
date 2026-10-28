@@ -50,6 +50,12 @@ public final class DvbFrontend {
     /** Fe + dvr close */
     public static native void nativeDvbClose();
 
+    /**
+     * Kilit durumu.
+     * @return 0 = kilit var, -1 = kilit yok / hata
+     */
+    public static native int  nativeDvbStatus();
+
     // ---- CIx / CI besleme (tuner kartinin TS ciktisini FFmpeg'e basmak) ----
 
     /**

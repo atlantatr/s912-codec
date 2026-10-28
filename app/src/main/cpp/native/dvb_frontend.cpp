@@ -1,17 +1,17 @@
 //
 // dvb_frontend.cpp
 //
-// DVB-S2 tuner (/dev/dvb/adapterN/frontend0) + DVR (/dev/dvb/adapterN/dvr0)
-// ve Amlogic CIx (/dev/ciN) TS kaynagi icin JNI katmani.
+// DVB-S/S2 tuner + demux -> TS akisi (JNI).
 //
-// Akis:
-//   DvbFrontend.nativeDvbOpen(0)
-//   DvbFrontend.nativeDvbTuneS2(freqHz, polH, loHz, hiHz, srKsym, fecNum, fecDen)
-//   DvbFrontend.nativeDvbPollTS(buf)  -> 188-byte TS paketleri
-//   CodecBridge.nativeFeedTSBytes(buf) -> FFmpeg mpegts demuxer
+// Amlogic S912 kutularinda aygit adlari standart DEGIL:
+//   /dev/dvb0.frontend0   /dev/dvb0.demux0   /dev/dvb0.dvr0
+// Bazi imajlarda standart yerlesim de olabilir:
+//   /dev/dvb/adapter0/frontend0 /dev/dvb/adapter0/demux0 /dev/dvb/adapter0/dvr0
+//   /dev/dvb/frontend0 ...
+// Bu yuzden her dugum icin aday yollarin tamami denenir.
 //
-// Not: Bu katman root gerektirmez; /dev/dvb ve /dev/ci node'lari icin
-// uygulamanin okuma izni olmasi gerekir (bazi kutularda 0660 root:system).
+// Tam TS icin demux'a "tum PID'ler" filtresi (0x2000) kurulur; aksi halde
+// /dev/dvb0.dvr0 bos kalir (filtre yoksa veri akmaz).
 //
 
 #include <jni.h>
@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <linux/dvb/dmx.h>
 #include <linux/dvb/frontend.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -33,54 +34,129 @@
 #define LOG_TAG "S912Dvb"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+
+// Amlogic 3.14 cekirdegi DMX_SET_SOURCE'u 65 numarali ioctl ile tanimlar;
+// mainline cekirdekler 49 kullanir. Ikisi de denenir.
+#define AML_DMX_SET_SOURCE _IOW('o', 65, int)
 
 namespace {
 
 struct DvbState {
     int feFd = -1;
     int dvrFd = -1;
-    bool s2 = true;
-    bool polH = true;
-    long loFreqHz = 9750000000L;
-    long hiFreqHz = 10600000000L;
-    int srKsym = 27500;
-    int fecNum = 5;
-    int fecDen = 6;
+    int dmxFd = -1;
+    int adapter = -1;
+    bool tuned = false;
 };
 
 DvbState g_state;
 
-int openFirst(const char* path1, const char* path2, int flags) {
-    int fd = open(path1, flags);
-    if (fd < 0 && path2 && *path2) {
-        fd = open(path2, flags);
+const char* kFePaths[] = {
+    "/dev/dvb/adapter%d/frontend0",
+    "/dev/dvb/frontend%d",
+    "/dev/dvb0.frontend%d",
+};
+
+const char* kDvrPaths[] = {
+    "/dev/dvb/adapter%d/dvr0",
+    "/dev/dvr0/dvr%d",
+    "/dev/dvb0.dvr%d",
+};
+
+const char* kDmxPaths[] = {
+    "/dev/dvb/adapter%d/demux0",
+    "/dev/dvb/demux%d",
+    "/dev/dvb0.demux%d",
+};
+
+int openByTemplate(const char* const* paths, size_t n, int idx, int flags) {
+    char buf[128];
+    for (size_t i = 0; i < n; i++) {
+        snprintf(buf, sizeof(buf), paths[i], idx);
+        int fd = open(buf, flags);
+        if (fd >= 0) {
+            LOGI("acildi: %s (fd=%d)", buf, fd);
+            return fd;
+        }
+        LOGW("acilamadi: %s (%s)", buf, strerror(errno));
     }
-    return fd;
+    return -1;
 }
 
-int dvbOpen(int adapterId) {
-    char fe1[128] = {0};
-    char fe2[128] = {0};
-    char dvr1[128] = {0};
-    char dvr2[128] = {0};
+void closeAll() {
+    if (g_state.dvrFd >= 0) close(g_state.dvrFd);
+    if (g_state.dmxFd >= 0) close(g_state.dmxFd);
+    if (g_state.feFd >= 0) close(g_state.feFd);
+    g_state = DvbState();
+}
 
-    snprintf(fe1, sizeof(fe1), "/dev/dvb/adapter%d/frontend0", adapterId);
-    snprintf(fe2, sizeof(fe2), "/dev/dvb/frontend%d", adapterId);
-    g_state.feFd = openFirst(fe1, fe2, O_RDWR | O_CLOEXEC);
-    if (g_state.feFd < 0) {
-        LOGE("frontend open fail (%s / %s): %s", fe1, fe2, strerror(errno));
+/**
+ * Demux'a tam TS filtresi kur (pid 0x2000 = tum PID'ler).
+ * Amlogic'te kaynak secimi (DMX_SET_SOURCE) zorunlu; olmadan dvr bos kalir.
+ */
+int setupDemux(int adapter) {
+    g_state.dmxFd = openByTemplate(kDmxPaths, 3, adapter, O_RDWR | O_CLOEXEC);
+    if (g_state.dmxFd < 0) {
+        LOGE("demux acilamadi");
         return -1;
     }
 
-    snprintf(dvr1, sizeof(dvr1), "/dev/dvb/adapter%d/dvr0", adapterId);
-    snprintf(dvr2, sizeof(dvr2), "/dev/dvr0/dvr%d", adapterId);
-    g_state.dvrFd = openFirst(dvr1, dvr2, O_RDONLY | O_CLOEXEC);
-    if (g_state.dvrFd < 0) {
-        LOGE("dvr open fail (%s / %s): %s", dvr1, dvr2, strerror(errno));
+    int src = adapter; // DMX_SOURCE_FRONT0 = 0, FRONT1 = 1 ...
+    if (ioctl(g_state.dmxFd, AML_DMX_SET_SOURCE, &src) < 0) {
+        LOGW("AML DMX_SET_SOURCE(65) basarisiz: %s", strerror(errno));
+#ifdef DMX_SET_SOURCE
+        enum dmx_source msrc = static_cast<enum dmx_source>(adapter);
+        if (ioctl(g_state.dmxFd, DMX_SET_SOURCE, &msrc) < 0) {
+            LOGW("DMX_SET_SOURCE(49) basarisiz: %s", strerror(errno));
+        } else {
+            LOGI("DMX_SET_SOURCE(49) ok, kaynak=%d", adapter);
+        }
+#endif
+    } else {
+        LOGI("DMX_SET_SOURCE(65) ok, kaynak=%d", adapter);
     }
 
-    LOGI("DVB open: adapter=%d fe=%d dvr=%d", adapterId, g_state.feFd,
-         g_state.dvrFd);
+    struct dmx_pes_filter_params f;
+    memset(&f, 0, sizeof(f));
+    f.pid = 0x2000;                 // tam TS
+    f.input = DMX_IN_FRONTEND;
+    f.output = DMX_OUT_TS_TAP;
+    f.pes_type = DMX_PES_OTHER;
+    f.flags = DMX_IMMEDIATE_START;
+
+    if (ioctl(g_state.dmxFd, DMX_SET_PES_FILTER, &f) < 0) {
+        LOGE("DMX_SET_PES_FILTER fail: %s", strerror(errno));
+        return -1;
+    }
+    LOGI("demux filtre kuruldu: pid=0x2000 (tam TS)");
+    return 0;
+}
+
+int dvbOpen(int adapterId) {
+    closeAll();
+
+    g_state.feFd = openByTemplate(kFePaths, 3, adapterId, O_RDWR | O_CLOEXEC);
+    if (g_state.feFd < 0) {
+        LOGE("frontend bulunamadi (adapter=%d)", adapterId);
+        return -1;
+    }
+
+    if (setupDemux(adapterId) != 0) {
+        closeAll();
+        return -1;
+    }
+
+    g_state.dvrFd = openByTemplate(kDvrPaths, 3, adapterId, O_RDONLY | O_CLOEXEC);
+    if (g_state.dvrFd < 0) {
+        LOGE("dvr acilamadi");
+        closeAll();
+        return -1;
+    }
+
+    g_state.adapter = adapterId;
+    LOGI("DVB hazir: adapter=%d fe=%d dmx=%d dvr=%d", adapterId, g_state.feFd,
+         g_state.dmxFd, g_state.dvrFd);
     return 0;
 }
 
@@ -103,6 +179,36 @@ long normalizeLnbHz(long value) {
     return (value > 0 && value < 1000000L) ? value * 1000L : value;
 }
 
+/** LNB beslemesi: 18V = yatay (H), 13V = dikey (V). */
+void setLnbVoltage(bool polH) {
+    fe_sec_voltage_t v = polH ? SEC_VOLTAGE_18 : SEC_VOLTAGE_13;
+    if (ioctl(g_state.feFd, FE_SET_VOLTAGE, v) < 0) {
+        LOGW("FE_SET_VOLTAGE(%d) basarisiz: %s", v, strerror(errno));
+    } else {
+        LOGI("LNB beslemesi: %d V", polH ? 18 : 13);
+    }
+}
+
+/** Kilit gelene kadar bekle. @return 0 = kilit var. */
+int waitLock(int timeoutMs) {
+    int waited = 0;
+    while (waited < timeoutMs) {
+        fe_status_t st = static_cast<fe_status_t>(0);
+        if (ioctl(g_state.feFd, FE_READ_STATUS, &st) == 0) {
+            if (st & FE_HAS_LOCK) {
+                LOGI("kilit tamam (%d ms, status=0x%02x)", waited, st);
+                return 0;
+            }
+        }
+        usleep(100 * 1000);
+        waited += 100;
+    }
+    fe_status_t st = static_cast<fe_status_t>(0);
+    ioctl(g_state.feFd, FE_READ_STATUS, &st);
+    LOGE("kilit yok (%d ms, status=0x%02x)", timeoutMs, st);
+    return -1;
+}
+
 int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
               int srKsym, int fecNum, int fecDen) {
     if (g_state.feFd < 0) {
@@ -110,20 +216,16 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
         return -1;
     }
 
-    g_state.polH = polH;
-    g_state.loFreqHz = normalizeLnbHz(loFreq);
-    g_state.hiFreqHz = normalizeLnbHz(hiFreq);
-    g_state.srKsym = srKsym;
-    g_state.fecNum = fecNum;
-    g_state.fecDen = fecDen;
+    const long loHz = normalizeLnbHz(loFreq);
+    const long hiHz = normalizeLnbHz(hiFreq);
 
     long ifFreq = freqHz;
     bool highBand = false;
 
-    // Uydu frekansi (yaklasik 10.7-12.75 GHz) verildiyse LNB IF'e cevir.
+    // Uydu frekansi (10.7-12.75 GHz) verildiyse LNB IF'e cevir.
     if (freqHz > 2000000000L) {
         highBand = freqHz >= 11700000000L;
-        const long lo = highBand ? g_state.hiFreqHz : g_state.loFreqHz;
+        const long lo = highBand ? hiHz : loHz;
         ifFreq = freqHz - lo;
         if (ifFreq < 950000000L || ifFreq > 2150000000L) {
             LOGE("tune: LNB IF araligi disinda (freq=%ld, LO=%ld, IF=%ld)",
@@ -131,7 +233,10 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
         }
     }
 
-    struct dtv_property props[8] = {};
+    setLnbVoltage(polH);
+
+    struct dtv_property props[10];
+    memset(props, 0, sizeof(props));
     int n = 0;
 
     props[n].cmd = DTV_DELIVERY_SYSTEM;
@@ -158,7 +263,8 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
     props[n].cmd = DTV_TONE;
     props[n++].u.data = highBand ? SEC_TONE_ON : SEC_TONE_OFF;
 
-    struct dtv_properties seq = {};
+    struct dtv_properties seq;
+    memset(&seq, 0, sizeof(seq));
     seq.num = static_cast<unsigned int>(n);
     seq.props = props;
 
@@ -170,6 +276,9 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
     LOGI("DVB tune: freq=%ld IF=%ld LNB=%s pol=%s SR=%d FEC=%d/%d",
          freqHz, ifFreq, highBand ? "HI" : "LO", polH ? "H" : "V", srKsym,
          fecNum, fecDen);
+
+    if (waitLock(6000) != 0) return -1;
+    g_state.tuned = true;
     return 0;
 }
 
@@ -195,9 +304,6 @@ extern "C" {
 JNIEXPORT jint JNICALL
 Java_com_amlogic_codec_DvbFrontend_nativeDvbOpen(
         JNIEnv*, jclass, jint adapter) {
-    if (g_state.feFd >= 0) close(g_state.feFd);
-    if (g_state.dvrFd >= 0) close(g_state.dvrFd);
-    g_state = DvbState();
     return dvbOpen(static_cast<int>(adapter));
 }
 
@@ -225,11 +331,18 @@ Java_com_amlogic_codec_DvbFrontend_nativeDvbPollTS(
     return n;
 }
 
+/** Kilit durumu: 0 = kilit var, -1 = yok. */
+JNIEXPORT jint JNICALL
+Java_com_amlogic_codec_DvbFrontend_nativeDvbStatus(JNIEnv*, jclass) {
+    if (g_state.feFd < 0) return -1;
+    fe_status_t st = static_cast<fe_status_t>(0);
+    if (ioctl(g_state.feFd, FE_READ_STATUS, &st) < 0) return -1;
+    return (st & FE_HAS_LOCK) ? 0 : -1;
+}
+
 JNIEXPORT void JNICALL
 Java_com_amlogic_codec_DvbFrontend_nativeDvbClose(JNIEnv*, jclass) {
-    if (g_state.feFd >= 0) close(g_state.feFd);
-    if (g_state.dvrFd >= 0) close(g_state.dvrFd);
-    g_state = DvbState();
+    closeAll();
 }
 
 JNIEXPORT jint JNICALL
@@ -241,10 +354,10 @@ Java_com_amlogic_codec_DvbFrontend_nativeCixOpen(
     snprintf(path2, sizeof(path2), "/dev/dvb/adapter%d/ca0",
              static_cast<int>(ciSlot));
 
-    int fd = openFirst(path1, path2, O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        fd = openFirst(path1, path2, O_RDONLY | O_CLOEXEC);
-    }
+    int fd = open(path1, O_RDWR | O_CLOEXEC);
+    if (fd < 0) fd = open(path2, O_RDWR | O_CLOEXEC);
+    if (fd < 0) fd = open(path1, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) fd = open(path2, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         LOGE("CIx open fail (%s / %s): %s", path1, path2, strerror(errno));
         return -1;
