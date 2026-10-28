@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-apk-${{ github.ref }}
@@ -212,3 +212,27 @@ jobs:
           name: s912-codec-apk
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      # artifact indirmek GitHub oturumu ister; disaridan (adb/telefon) kolay
+      # erisim icin APK'yi ayri bir dala da yaz. Indirme adresi:
+      #   https://raw.githubusercontent.com/<owner>/<repo>/apk-latest/s912-codec.apk
+      - name: Publish APK to apk-latest branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          echo "APK: $APK ($(stat -c%s "$APK") bayt)"
+          rm -rf /tmp/pub && mkdir -p /tmp/pub
+          cp "$APK" /tmp/pub/s912-codec.apk
+          ( cd /tmp/pub
+            git init -q -b apk-latest
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add s912-codec.apk
+            git commit -q -m "APK ${GITHUB_SHA}"
+            git push -q --force \
+              "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" apk-latest
+          )
+          sha256sum /tmp/pub/s912-codec.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
