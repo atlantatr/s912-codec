@@ -91,6 +91,9 @@ void closeAll() {
     g_state = DvbState();
 }
 
+// Ileri bildirim (tanim dosyanin sonunda).
+void setDemuxSource(int adapter);
+
 /**
  * Demux'a tam TS filtresi kur (pid 0x2000 = tum PID'ler).
  * Amlogic'te kaynak secimi (DMX_SET_SOURCE) zorunlu; olmadan dvr bos kalir.
@@ -102,20 +105,7 @@ int setupDemux(int adapter) {
         return -1;
     }
 
-    int src = adapter; // DMX_SOURCE_FRONT0 = 0, FRONT1 = 1 ...
-    if (ioctl(g_state.dmxFd, AML_DMX_SET_SOURCE, &src) < 0) {
-        LOGW("AML DMX_SET_SOURCE(65) basarisiz: %s", strerror(errno));
-#ifdef DMX_SET_SOURCE
-        enum dmx_source msrc = static_cast<enum dmx_source>(adapter);
-        if (ioctl(g_state.dmxFd, DMX_SET_SOURCE, &msrc) < 0) {
-            LOGW("DMX_SET_SOURCE(49) basarisiz: %s", strerror(errno));
-        } else {
-            LOGI("DMX_SET_SOURCE(49) ok, kaynak=%d", adapter);
-        }
-#endif
-    } else {
-        LOGI("DMX_SET_SOURCE(65) ok, kaynak=%d", adapter);
-    }
+    setDemuxSource(adapter);
 
     struct dmx_pes_filter_params f;
     memset(&f, 0, sizeof(f));
@@ -192,21 +182,106 @@ void setLnbVoltage(bool polH) {
 /** Kilit gelene kadar bekle. @return 0 = kilit var. */
 int waitLock(int timeoutMs) {
     int waited = 0;
+    fe_status_t last = static_cast<fe_status_t>(0);
     while (waited < timeoutMs) {
         fe_status_t st = static_cast<fe_status_t>(0);
         if (ioctl(g_state.feFd, FE_READ_STATUS, &st) == 0) {
+            last = st;
             if (st & FE_HAS_LOCK) {
-                LOGI("kilit tamam (%d ms, status=0x%02x)", waited, st);
+                uint16_t sig = 0, snr = 0;
+                ioctl(g_state.feFd, FE_READ_SIGNAL_STRENGTH, &sig);
+                ioctl(g_state.feFd, FE_READ_SNR, &snr);
+                LOGI("kilit tamam (%d ms, status=0x%02x, sinyal=%u, snr=%u)",
+                     waited, st, sig, snr);
                 return 0;
+            }
+            if (waited % 1000 == 0) {
+                uint16_t sig = 0;
+                ioctl(g_state.feFd, FE_READ_SIGNAL_STRENGTH, &sig);
+                LOGI("bekleniyor %d ms: status=0x%02x sinyal=%u", waited, st, sig);
             }
         }
         usleep(100 * 1000);
         waited += 100;
     }
-    fe_status_t st = static_cast<fe_status_t>(0);
-    ioctl(g_state.feFd, FE_READ_STATUS, &st);
-    LOGE("kilit yok (%d ms, status=0x%02x)", timeoutMs, st);
+    LOGE("kilit yok (%d ms, status=0x%02x)", timeoutMs, last);
     return -1;
+}
+
+/** Tek bir DTV özelliği yaz. @return 0 = kabul edildi. */
+int setProp(int fd, uint32_t cmd, uint32_t data) {
+    struct dtv_property p;
+    memset(&p, 0, sizeof(p));
+    p.cmd = cmd;
+    p.u.data = data;
+    struct dtv_properties seq;
+    memset(&seq, 0, sizeof(seq));
+    seq.num = 1;
+    seq.props = &p;
+    return ioctl(fd, FE_SET_PROPERTY, &seq);
+}
+
+/** Tek bir DTV özelliği oku. @return 0 = okundu. */
+int getProp(int fd, uint32_t cmd, uint32_t* out) {
+    struct dtv_property p;
+    memset(&p, 0, sizeof(p));
+    p.cmd = cmd;
+    struct dtv_properties seq;
+    memset(&seq, 0, sizeof(seq));
+    seq.num = 1;
+    seq.props = &p;
+    if (ioctl(fd, FE_GET_PROPERTY, &seq) < 0) return -1;
+    if (out) *out = p.u.data;
+    return 0;
+}
+
+void logFrontendInfo() {
+    struct dvb_frontend_info info;
+    memset(&info, 0, sizeof(info));
+    if (ioctl(g_state.feFd, FE_GET_INFO, &info) == 0) {
+        LOGI("frontend: %s type=%d caps=0x%08x symbol_rate=%u-%u",
+             info.name, info.type, info.caps,
+             info.symbol_rate_min, info.symbol_rate_max);
+    } else {
+        LOGW("FE_GET_INFO fail: %s", strerror(errno));
+    }
+    uint32_t api = 0;
+    if (getProp(g_state.feFd, DTV_API_VERSION, &api) == 0) {
+        LOGI("DTV API surumu: %u.%u", api >> 16, api & 0xffff);
+    } else {
+        LOGW("DTV_API_VERSION okunamadi (legacy ioctl olabilir)");
+    }
+}
+
+/**
+ * Amlogic 3.14 cekirdekleri DMX_SET_SOURCE'u farkli ioctl imzalariyla tanimlar.
+ * Hepsini sirayla dene; hicbiri tutmazsa filtre yine de varsayilan kaynakla
+ * calisabilir, bu yuzden hata olumcul degil.
+ */
+void setDemuxSource(int adapter) {
+    int src = adapter;
+    if (ioctl(g_state.dmxFd, AML_DMX_SET_SOURCE, &src) == 0) {
+        LOGI("DMX_SET_SOURCE _IOW(65) ok");
+        return;
+    }
+    if (ioctl(g_state.dmxFd, _IO('o', 65), &src) == 0) {
+        LOGI("DMX_SET_SOURCE _IO(65) ok");
+        return;
+    }
+    if (ioctl(g_state.dmxFd, _IOW('o', 65, int), &src) == 0) {
+        LOGI("DMX_SET_SOURCE _IOW(int) ok");
+        return;
+    }
+#ifdef DMX_SET_SOURCE
+    {
+        enum dmx_source msrc = static_cast<enum dmx_source>(adapter);
+        if (ioctl(g_state.dmxFd, DMX_SET_SOURCE, &msrc) == 0) {
+            LOGI("DMX_SET_SOURCE (mainline) ok");
+            return;
+        }
+    }
+#endif
+    LOGW("DMX_SET_SOURCE desteklenmiyor (varsayilan kaynak kullanilacak)");
 }
 
 int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
@@ -215,6 +290,8 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
         LOGE("tune: frontend acik degil");
         return -1;
     }
+
+    logFrontendInfo();
 
     const long loHz = normalizeLnbHz(loFreq);
     const long hiHz = normalizeLnbHz(hiFreq);
@@ -235,49 +312,44 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
 
     setLnbVoltage(polH);
 
-    struct dtv_property props[10];
-    memset(props, 0, sizeof(props));
-    int n = 0;
+    // Amlogic 3.14 bazi imajlarda ozellik dizisini tek seferde reddediyor
+    // (EINVAL). Bu yuzden her ozellik ayri ayri yazilir ve zorunlu olmayanlar
+    // (pilot/rolloff/fec) basarisiz olsa bile devam edilir.
+    struct { const char* name; uint32_t cmd; uint32_t val; bool required; } props[] = {
+        {"DELIVERY_SYSTEM", DTV_DELIVERY_SYSTEM, SYS_DVBS2, false},
+        {"FREQUENCY",       DTV_FREQUENCY,       static_cast<uint32_t>(ifFreq), true},
+        {"SYMBOL_RATE",     DTV_SYMBOL_RATE,     static_cast<uint32_t>(srKsym) * 1000U, true},
+        {"INNER_FEC",       DTV_INNER_FEC,       static_cast<uint32_t>(fecFromRatio(fecNum, fecDen)), false},
+        {"INVERSION",       DTV_INVERSION,       INVERSION_AUTO, false},
+        {"PILOT",           DTV_PILOT,           PILOT_AUTO, false},
+        {"ROLLOFF",         DTV_ROLLOFF,         ROLLOFF_AUTO, false},
+        {"TONE",            DTV_TONE,            highBand ? SEC_TONE_ON : SEC_TONE_OFF, false},
+    };
 
-    props[n].cmd = DTV_DELIVERY_SYSTEM;
-    props[n++].u.data = SYS_DVBS2;
-
-    props[n].cmd = DTV_FREQUENCY;
-    props[n++].u.data = static_cast<uint32_t>(ifFreq);
-
-    props[n].cmd = DTV_SYMBOL_RATE;
-    props[n++].u.data = static_cast<uint32_t>(srKsym) * 1000U;
-
-    props[n].cmd = DTV_INNER_FEC;
-    props[n++].u.data = fecFromRatio(fecNum, fecDen);
-
-    props[n].cmd = DTV_INVERSION;
-    props[n++].u.data = INVERSION_AUTO;
-
-    props[n].cmd = DTV_PILOT;
-    props[n++].u.data = PILOT_AUTO;
-
-    props[n].cmd = DTV_ROLLOFF;
-    props[n++].u.data = ROLLOFF_AUTO;
-
-    props[n].cmd = DTV_TONE;
-    props[n++].u.data = highBand ? SEC_TONE_ON : SEC_TONE_OFF;
-
-    struct dtv_properties seq;
-    memset(&seq, 0, sizeof(seq));
-    seq.num = static_cast<unsigned int>(n);
-    seq.props = props;
-
-    if (ioctl(g_state.feFd, FE_SET_PROPERTY, &seq) < 0) {
-        LOGE("FE_SET_PROPERTY fail: %s", strerror(errno));
-        return -1;
+    for (auto& p : props) {
+        int r = setProp(g_state.feFd, p.cmd, p.val);
+        if (r == 0) {
+            LOGI("  %s = %u ok", p.name, p.val);
+            continue;
+        }
+        if (p.required) {
+            LOGE("  %s = %u REDDEDILDI: %s", p.name, p.val, strerror(errno));
+            return -1;
+        }
+        LOGW("  %s = %u desteklenmiyor (%s)", p.name, p.val, strerror(errno));
+        if (p.cmd == DTV_DELIVERY_SYSTEM) {
+            // S2 kabul edilmediyse S (QPSK) olarak dene.
+            if (setProp(g_state.feFd, DTV_DELIVERY_SYSTEM, SYS_DVBS) == 0) {
+                LOGI("  DELIVERY_SYSTEM = SYS_DVBS ok (S2 desteklenmiyor)");
+            }
+        }
     }
 
     LOGI("DVB tune: freq=%ld IF=%ld LNB=%s pol=%s SR=%d FEC=%d/%d",
          freqHz, ifFreq, highBand ? "HI" : "LO", polH ? "H" : "V", srKsym,
          fecNum, fecDen);
 
-    if (waitLock(6000) != 0) return -1;
+    if (waitLock(8000) != 0) return -1;
     g_state.tuned = true;
     return 0;
 }
