@@ -51,6 +51,7 @@ extern "C" {
 
 #define LOG_TAG "S912Codec"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -209,6 +210,21 @@ void setupSwrLocked() {
         LOGE("swr_alloc_set_opts2 fail: %d", r);
         return;
     }
+
+    // Cok kanalli kaynagi stereo cikisa indirgerken Dolby Pro Logic II matris
+    // kodlamasi kullan. Boylece 2 kanalli HDMI baglantisinda bile surround
+    // bilgisi korunur: TV/AVR "Pro Logic II" ile 5.1'e geri acabilir.
+    // (Duz downmix'e gore stereo dinleyici icin fark yaratmaz, geriye uyumludur.)
+    if (inLayout.nb_channels > 2 && g_state.outChannels == 2) {
+        int mr = av_opt_set(swr, "matrix_encoding", "dolby", 0);
+        if (mr >= 0) {
+            LOGI("swr: %d -> 2 kanal, Dolby Pro Logic II matris kodlamasi acik",
+                 inLayout.nb_channels);
+        } else {
+            LOGW("swr: matrix_encoding ayarlanamadi: %d", mr);
+        }
+    }
+
     if (swr_init(swr) < 0) {
         LOGE("swr_init fail (in_fmt=%d, rate=%d, ch=%d)",
              g_state.audioCtx->sample_fmt, g_state.audioCtx->sample_rate,
