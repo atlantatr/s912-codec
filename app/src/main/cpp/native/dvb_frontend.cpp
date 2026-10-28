@@ -1,4 +1,4 @@
-//
+﻿//
 // dvb_frontend.cpp
 //
 // DVB-S/S2 tuner + demux -> TS akisi (JNI).
@@ -208,7 +208,7 @@ int waitLock(int timeoutMs) {
     return -1;
 }
 
-/** Tek bir DTV özelliği yaz. @return 0 = kabul edildi. */
+/** Tek bir DTV Ã¶zelliÄŸi yaz. @return 0 = kabul edildi. */
 int setProp(int fd, uint32_t cmd, uint32_t data) {
     struct dtv_property p;
     memset(&p, 0, sizeof(p));
@@ -221,7 +221,7 @@ int setProp(int fd, uint32_t cmd, uint32_t data) {
     return ioctl(fd, FE_SET_PROPERTY, &seq);
 }
 
-/** Tek bir DTV özelliği oku. @return 0 = okundu. */
+/** Tek bir DTV Ã¶zelliÄŸi oku. @return 0 = okundu. */
 int getProp(int fd, uint32_t cmd, uint32_t* out) {
     struct dtv_property p;
     memset(&p, 0, sizeof(p));
@@ -235,16 +235,50 @@ int getProp(int fd, uint32_t cmd, uint32_t* out) {
     return 0;
 }
 
-void logFrontendInfo() {
+void logFrontendInfoAt(int fd, const char* label) {
     struct dvb_frontend_info info;
     memset(&info, 0, sizeof(info));
-    if (ioctl(g_state.feFd, FE_GET_INFO, &info) == 0) {
-        LOGI("frontend: %s type=%d caps=0x%08x symbol_rate=%u-%u",
-             info.name, info.type, info.caps,
-             info.symbol_rate_min, info.symbol_rate_max);
-    } else {
-        LOGW("FE_GET_INFO fail: %s", strerror(errno));
+    if (ioctl(fd, FE_GET_INFO, &info) != 0) {
+        LOGW("%s: FE_GET_INFO fail: %s", label, strerror(errno));
+        return;
     }
+    fe_status_t st = static_cast<fe_status_t>(0);
+    ioctl(fd, FE_READ_STATUS, &st);
+    uint16_t sig = 0, snr = 0;
+    ioctl(fd, FE_READ_SIGNAL_STRENGTH, &sig);
+    ioctl(fd, FE_READ_SNR, &snr);
+    LOGI("%s: %s type=%d caps=0x%08x sr=%u-%u status=0x%02x sinyal=%u snr=%u",
+         label, info.name, info.type, info.caps, info.symbol_rate_min,
+         info.symbol_rate_max, st, sig, snr);
+    LOGI("%s: 2G(S2)=%d QPSK=%d AUTO_FEC=%d MULTISTREAM=%d",
+         label,
+         (info.caps & FE_CAN_2G_MODULATION) ? 1 : 0,
+         (info.caps & FE_CAN_QPSK) ? 1 : 0,
+         (info.caps & FE_CAN_FEC_AUTO) ? 1 : 0,
+         (info.caps & FE_CAN_MULTISTREAM) ? 1 : 0);
+}
+
+/** Tum frontend dugumlerini yokla (hangi dugum S2 destekliyor / mesgul mu). */
+void probeFrontends() {
+    static const char* tmpls[] = {
+        "/dev/dvb0.frontend%d",
+        "/dev/dvb/adapter0/frontend%d",
+        "/dev/dvb/frontend%d",
+    };
+    for (int idx = 0; idx < 3; idx++) {
+        for (auto tmpl : tmpls) {
+            char path[128];
+            snprintf(path, sizeof(path), tmpl, idx);
+            int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+            if (fd < 0) continue;
+            logFrontendInfoAt(fd, path);
+            close(fd);
+        }
+    }
+}
+
+void logFrontendInfo() {
+    logFrontendInfoAt(g_state.feFd, "aktif frontend");
     uint32_t api = 0;
     if (getProp(g_state.feFd, DTV_API_VERSION, &api) == 0) {
         LOGI("DTV API surumu: %u.%u", api >> 16, api & 0xffff);
@@ -253,35 +287,23 @@ void logFrontendInfo() {
     }
 }
 
-/**
- * Amlogic 3.14 cekirdekleri DMX_SET_SOURCE'u farkli ioctl imzalariyla tanimlar.
- * Hepsini sirayla dene; hicbiri tutmazsa filtre yine de varsayilan kaynakla
- * calisabilir, bu yuzden hata olumcul degil.
- */
-void setDemuxSource(int adapter) {
-    int src = adapter;
-    if (ioctl(g_state.dmxFd, AML_DMX_SET_SOURCE, &src) == 0) {
-        LOGI("DMX_SET_SOURCE _IOW(65) ok");
-        return;
+/** Legacy (DVBv3) tuning: FE_SET_FRONTEND. */
+int legacyTune(uint32_t ifFreq, uint32_t srHz, fe_code_rate fec) {
+    struct dvb_frontend_parameters p;
+    memset(&p, 0, sizeof(p));
+    p.frequency = ifFreq;
+    p.inversion = INVERSION_AUTO;
+    p.u.qpsk.symbol_rate = srHz;
+    p.u.qpsk.fec_inner = fec;
+
+    if (ioctl(g_state.feFd, FE_SET_FRONTEND, &p) < 0) {
+        LOGE("  legacy FE_SET_FRONTEND fail: %s", strerror(errno));
+        return -1;
     }
-    if (ioctl(g_state.dmxFd, _IO('o', 65), &src) == 0) {
-        LOGI("DMX_SET_SOURCE _IO(65) ok");
-        return;
-    }
-    if (ioctl(g_state.dmxFd, _IOW('o', 65, int), &src) == 0) {
-        LOGI("DMX_SET_SOURCE _IOW(int) ok");
-        return;
-    }
-#ifdef DMX_SET_SOURCE
-    {
-        enum dmx_source msrc = static_cast<enum dmx_source>(adapter);
-        if (ioctl(g_state.dmxFd, DMX_SET_SOURCE, &msrc) == 0) {
-            LOGI("DMX_SET_SOURCE (mainline) ok");
-            return;
-        }
-    }
-#endif
-    LOGW("DMX_SET_SOURCE desteklenmiyor (varsayilan kaynak kullanilacak)");
+    LOGI("  legacy FE_SET_FRONTEND ok (freq=%u sr=%u fec=%d)", ifFreq, srHz, fec);
+
+    // Bazi Amlogic imajlari tune sonrasi tone/voltage'i sifirliyor: tekrar yaz.
+    return 0;
 }
 
 int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
@@ -291,7 +313,23 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
         return -1;
     }
 
+    probeFrontends();
     logFrontendInfo();
+
+    // Vendor uygulamasi (veya onceki oturum) frontend'i zaten kilitlemis
+    // olabilir; bu durumda yeniden tune etmeye gerek yok, TS akmaya hazir.
+    {
+        fe_status_t cur = static_cast<fe_status_t>(0);
+        if (ioctl(g_state.feFd, FE_READ_STATUS, &cur) == 0 && (cur & FE_HAS_LOCK)) {
+            uint16_t sig = 0, snr = 0;
+            ioctl(g_state.feFd, FE_READ_SIGNAL_STRENGTH, &sig);
+            ioctl(g_state.feFd, FE_READ_SNR, &snr);
+            LOGI("frontend ZATEN kilitli (status=0x%02x sinyal=%u snr=%u) -> "
+                 "tune atlandi", cur, sig, snr);
+            g_state.tuned = true;
+            return 0;
+        }
+    }
 
     const long loHz = normalizeLnbHz(loFreq);
     const long hiHz = normalizeLnbHz(hiFreq);
@@ -312,37 +350,44 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
 
     setLnbVoltage(polH);
 
-    // Amlogic 3.14 bazi imajlarda ozellik dizisini tek seferde reddediyor
-    // (EINVAL). Bu yuzden her ozellik ayri ayri yazilir ve zorunlu olmayanlar
-    // (pilot/rolloff/fec) basarisiz olsa bile devam edilir.
-    struct { const char* name; uint32_t cmd; uint32_t val; bool required; } props[] = {
-        {"DELIVERY_SYSTEM", DTV_DELIVERY_SYSTEM, SYS_DVBS2, false},
-        {"FREQUENCY",       DTV_FREQUENCY,       static_cast<uint32_t>(ifFreq), true},
-        {"SYMBOL_RATE",     DTV_SYMBOL_RATE,     static_cast<uint32_t>(srKsym) * 1000U, true},
-        {"INNER_FEC",       DTV_INNER_FEC,       static_cast<uint32_t>(fecFromRatio(fecNum, fecDen)), false},
-        {"INVERSION",       DTV_INVERSION,       INVERSION_AUTO, false},
-        {"PILOT",           DTV_PILOT,           PILOT_AUTO, false},
-        {"ROLLOFF",         DTV_ROLLOFF,         ROLLOFF_AUTO, false},
-        {"TONE",            DTV_TONE,            highBand ? SEC_TONE_ON : SEC_TONE_OFF, false},
-    };
+    const uint32_t srHz = static_cast<uint32_t>(srKsym) * 1000U;
+    const fe_code_rate fec = fecFromRatio(fecNum, fecDen);
 
-    for (auto& p : props) {
-        int r = setProp(g_state.feFd, p.cmd, p.val);
+    // 1) DVBv5 yolunu dene (bazi imajlarda destekli).
+    bool v5ok = false;
+    {
+        int r = setProp(g_state.feFd, DTV_DELIVERY_SYSTEM, SYS_DVBS2);
         if (r == 0) {
-            LOGI("  %s = %u ok", p.name, p.val);
-            continue;
+            setProp(g_state.feFd, DTV_FREQUENCY, static_cast<uint32_t>(ifFreq));
+            setProp(g_state.feFd, DTV_SYMBOL_RATE, srHz);
+            setProp(g_state.feFd, DTV_INNER_FEC, static_cast<uint32_t>(fec));
+            setProp(g_state.feFd, DTV_INVERSION, INVERSION_AUTO);
+            setProp(g_state.feFd, DTV_PILOT, PILOT_AUTO);
+            setProp(g_state.feFd, DTV_ROLLOFF, ROLLOFF_AUTO);
+            setProp(g_state.feFd, DTV_TONE, highBand ? SEC_TONE_ON : SEC_TONE_OFF);
+            LOGI("DVBv5 ozellikleri yazildi");
+            v5ok = true;
+        } else {
+            LOGW("DVBv5 desteklenmiyor (%s) -> legacy yola geciyorum",
+                 strerror(errno));
         }
-        if (p.required) {
-            LOGE("  %s = %u REDDEDILDI: %s", p.name, p.val, strerror(errno));
-            return -1;
+    }
+
+    if (!v5ok) {
+        // 2) Legacy yol. Tone'u once ayarla (bazi suruculer bunu istiyor).
+        if (ioctl(g_state.feFd, FE_SET_TONE,
+                  highBand ? SEC_TONE_ON : SEC_TONE_OFF) < 0) {
+            LOGW("  FE_SET_TONE fail: %s", strerror(errno));
         }
-        LOGW("  %s = %u desteklenmiyor (%s)", p.name, p.val, strerror(errno));
-        if (p.cmd == DTV_DELIVERY_SYSTEM) {
-            // S2 kabul edilmediyse S (QPSK) olarak dene.
-            if (setProp(g_state.feFd, DTV_DELIVERY_SYSTEM, SYS_DVBS) == 0) {
-                LOGI("  DELIVERY_SYSTEM = SYS_DVBS ok (S2 desteklenmiyor)");
+        if (legacyTune(static_cast<uint32_t>(ifFreq), srHz, fec) != 0) {
+            // FEC AUTO ile bir kez daha dene.
+            if (legacyTune(static_cast<uint32_t>(ifFreq), srHz, FEC_AUTO) != 0) {
+                LOGE("legacy tuning de basarisiz");
+                return -1;
             }
         }
+        setLnbVoltage(polH);
+        ioctl(g_state.feFd, FE_SET_TONE, highBand ? SEC_TONE_ON : SEC_TONE_OFF);
     }
 
     LOGI("DVB tune: freq=%ld IF=%ld LNB=%s pol=%s SR=%d FEC=%d/%d",
@@ -352,6 +397,41 @@ int dvbTuneS2(long freqHz, bool polH, long loFreq, long hiFreq,
     if (waitLock(8000) != 0) return -1;
     g_state.tuned = true;
     return 0;
+}
+
+/**
+ * Amlogic 3.14 cekirdekleri DMX_SET_SOURCE'u farkli ioctl imzalariyla tanimlar.
+ * Hepsini sirayla dene; hicbiri tutmazsa filtre yine de varsayilan kaynakla
+ * calisabilir, bu yuzden hata olumcul degil.
+ */
+void setDemuxSource(int adapter) {
+    int src = adapter;
+    struct { const char* name; unsigned long req; bool byPointer; } tries[] = {
+        {"_IOW('o',65,int)+ptr", AML_DMX_SET_SOURCE, true},
+        {"_IO('o',65)+val",      _IO('o', 65),       false},
+        {"_IOW('o',65,int)+val", _IOW('o', 65, int), false},
+        {"_IOWR('o',65,int)+ptr", _IOWR('o', 65, int), true},
+    };
+    for (auto& t : tries) {
+        int r = t.byPointer ? ioctl(g_state.dmxFd, t.req, &src)
+                            : ioctl(g_state.dmxFd, t.req, static_cast<unsigned long>(src));
+        if (r == 0) {
+            LOGI("DMX_SET_SOURCE %s ok (kaynak=%d)", t.name, adapter);
+            return;
+        }
+        LOGW("DMX_SET_SOURCE %s -> %s", t.name, strerror(errno));
+    }
+#ifdef DMX_SET_SOURCE
+    {
+        enum dmx_source msrc = static_cast<enum dmx_source>(adapter);
+        if (ioctl(g_state.dmxFd, DMX_SET_SOURCE, &msrc) == 0) {
+            LOGI("DMX_SET_SOURCE (mainline) ok");
+            return;
+        }
+        LOGW("DMX_SET_SOURCE (mainline) -> %s", strerror(errno));
+    }
+#endif
+    LOGW("DMX_SET_SOURCE desteklenmiyor (varsayilan kaynak kullanilacak)");
 }
 
 long dvbPollTSPackets(uint8_t* out, int capBytes) {

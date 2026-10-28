@@ -97,35 +97,44 @@ class SrtCodecPlayer {
         fecDen: Int = 3
     ): Boolean {
         releaseDvb()
-        val d = DvbSource()
-        dvb = d
-        if (!d.openTuner(
-                frontend = adapter,
-                freqHz = freqHz,
-                polH = polH,
-                sr = srKsym,
-                fecNum = fecNum,
-                fecDen = fecDen
-        )) {
-            Log.e(TAG, "DVB acilamadi (freq=$freqHz sr=$srKsym adapter=$adapter)")
-            dvb = null
-            return false
-        }
-        d.start()
-
-        // FFmpeg'in PAT/PMT okuyup codec'leri bulmasi icin bekle.
-        var waited = 0
-        while (waited < 8000) {
-            if (CodecBridge.nativeAudioRate() > 0 || CodecBridge.nativeHasVideo() != 0) {
-                Log.i(TAG, "DVB akis hazir (${waited} ms): video=${CodecBridge.nativeHasVideo()} " +
-                        "audio=${CodecBridge.nativeAudioRate()}Hz/${CodecBridge.nativeAudioChannels()}ch " +
-                        "codec=${CodecBridge.nativeAudioCodecId()}")
-                return true
+        // Bazi imajlarda 0. frontend vendor servisi tarafindan tutulur;
+        // 0 ve 1 numarali frontend'leri sirayla dene.
+        val candidates = if (adapter == 0) intArrayOf(0, 1) else intArrayOf(adapter)
+        for (a in candidates) {
+            val d = DvbSource()
+            dvb = d
+            if (!d.openTuner(
+                    frontend = a,
+                    freqHz = freqHz,
+                    polH = polH,
+                    sr = srKsym,
+                    fecNum = fecNum,
+                    fecDen = fecDen
+            )) {
+                Log.e(TAG, "DVB acilamadi (freq=$freqHz sr=$srKsym adapter=$a)")
+                d.release()
+                dvb = null
+                continue
             }
-            Thread.sleep(100)
-            waited += 100
+            d.start()
+
+            // FFmpeg'in PAT/PMT okuyup codec'leri bulmasi icin bekle.
+            var waited = 0
+            while (waited < 8000) {
+                if (CodecBridge.nativeAudioRate() > 0 || CodecBridge.nativeHasVideo() != 0) {
+                    Log.i(TAG, "DVB akis hazir (adapter=$a, ${waited} ms): " +
+                            "video=${CodecBridge.nativeHasVideo()} " +
+                            "audio=${CodecBridge.nativeAudioRate()}Hz/${CodecBridge.nativeAudioChannels()}ch " +
+                            "codec=${CodecBridge.nativeAudioCodecId()}")
+                    return true
+                }
+                Thread.sleep(100)
+                waited += 100
+            }
+            Log.e(TAG, "DVB akis hazir olmadi (adapter=$a, ${waited} ms)")
+            d.release()
+            dvb = null
         }
-        Log.e(TAG, "DVB akis hazir olmadi (${waited} ms)")
         return false
     }
 
