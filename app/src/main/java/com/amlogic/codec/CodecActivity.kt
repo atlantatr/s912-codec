@@ -2,6 +2,8 @@ package com.amlogic.codec;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -31,6 +33,8 @@ class CodecActivity : Activity() {
 
     private var usePass = true
     private var surface: Surface? = null
+    private val ui = Handler(Looper.getMainLooper())
+    private var lastUrl = ""
 
     private val holderCallback = object : SurfaceHolder.Callback {
         override fun surfaceCreated(holder: SurfaceHolder) {
@@ -113,6 +117,45 @@ class CodecActivity : Activity() {
         btnStop.setOnClickListener { stopPlayback() }
 
         setContentView(root)
+
+        // API 23+: /sdcard okumak icin izin iste (targetSdk 25).
+        if (android.os.Build.VERSION.SDK_INT >= 23 &&
+            checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE), 1)
+        }
+
+        handleAutoPlay(intent?.getStringExtra("url"))
+    }
+
+    private fun handleAutoPlay(autoUrl: String?) {
+        if (autoUrl.isNullOrBlank()) {
+            tvStatus.text = audioStatus("Hazir. SRT URL yaz ve Play.")
+            return
+        }
+        etUrl.setText(autoUrl)
+        tvStatus.text = "Otomatik aciliyor: $autoUrl"
+        // Surface'in hazir olmasini bekle.
+        ui.postDelayed({ if (!isFinishing) onPlay() }, 1500)
+    }
+
+    override fun onNewIntent(intent: android.content.Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAutoPlay(intent?.getStringExtra("url"))
+    }
+
+    /** digital_raw / HDMI durumunu tek satirda ozetler. */
+    private fun audioStatus(prefix: String): String {
+        val raw = AmlogicRawAudio.readRawMode()
+        val mode = when (raw) {
+            1 -> "RAW (bitstream)"
+            0 -> "PCM"
+            else -> "okunamadi"
+        }
+        val avail = if (AmlogicRawAudio.isAvailable()) "" else " [dugum yazilamaz]"
+        return "$prefix\nDijital cikis: $mode$avail"
     }
 
     private fun onPlay() {
@@ -122,6 +165,7 @@ class CodecActivity : Activity() {
             return
         }
 
+        lastUrl = url
         tvStatus.text = "Aciyor: $url"
         if (!player.open(url)) {
             tvStatus.text = "Acilamadi (SRT/demuxer hatasi)."
@@ -131,31 +175,41 @@ class CodecActivity : Activity() {
         val s = surface
         if (s != null) {
             player.startVideo(s)
-            tvStatus.text = "Video: HW decode - $url"
-        } else {
-            tvStatus.text = "Sadece audio (Surface hazir degil)"
         }
 
         if (usePass) {
             player.startPassThrough()
-            tvStatus.text = "Audio: passthrough - $url"
         } else {
             player.start()
-            tvStatus.text = "Audio: PCM decode - $url"
         }
 
         btnPlay.isEnabled = false
         btnStop.isEnabled = true
+
+        // digital_raw degisimini canli goster.
+        ui.removeCallbacks(statusTick)
+        ui.post(statusTick)
+    }
+
+    private val statusTick = object : Runnable {
+        override fun run() {
+            if (isFinishing) return
+            tvStatus.text = audioStatus("Oynatiliyor: $lastUrl")
+            ui.postDelayed(this, 1000)
+        }
     }
 
     private fun stopPlayback() {
+        ui.removeCallbacks(statusTick)
         player.release()
-        tvStatus.text = "Durduruldu."
+        player = SrtCodecPlayer()   // release() native baglami kapatir, yeniden kullanilamaz
+        tvStatus.text = audioStatus("Durduruldu.")
         btnPlay.isEnabled = true
         btnStop.isEnabled = false
     }
 
     override fun onDestroy() {
+        ui.removeCallbacks(statusTick)
         player.release()
         super.onDestroy()
     }

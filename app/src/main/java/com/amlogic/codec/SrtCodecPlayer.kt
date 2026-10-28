@@ -30,6 +30,9 @@ class SrtCodecPlayer {
     private var track: AudioTrack? = null
     private var video: VideoDecoder? = null
 
+    /** digital_raw'in bizim degistirmeden onceki degeri (-1 = bilinmiyor). */
+    private var rawPrevious = -1
+
     // 1 saniyelik stereo s16 @48k tampon.
     private val pcmBuf = ByteArray(48000 * 2 * 2)
 
@@ -80,6 +83,10 @@ class SrtCodecPlayer {
     /**
      * AC3/EAC3/DTS/TrueHD bitstream'i AudioTrack offload'a basar.
      * Offload desteklenmiyorsa PCM decode'a duser.
+     *
+     * Amlogic kutularda bitstream icin /sys/class/audiodsp/digital_raw=1
+     * olmasi gerekir; asagida AudioTrack'ten ONCE set edilir, is bitince
+     * geri alinir.
      */
     fun startPassThrough() {
         if (CodecBridge.nativeCanPassThrough() == 0) {
@@ -95,6 +102,9 @@ class SrtCodecPlayer {
             else -> AudioFormat.ENCODING_AC3
         }
 
+        // Bitstream yolu: kutu raw moda alinir (root gerekmez).
+        applyRawMode()
+
         try {
             val at = createAudioTrack(
                 sampleRate = 48000,
@@ -107,6 +117,7 @@ class SrtCodecPlayer {
             track = at
         } catch (e: Exception) {
             Log.e(TAG, "passthrough AudioTrack kurulamadi: ${e.message}")
+            restoreRawMode()
             start()
             return
         }
@@ -128,6 +139,7 @@ class SrtCodecPlayer {
                 Log.e(TAG, "passthrough dongu hatasi: ${e.message}")
             } finally {
                 running = false
+                restoreRawMode()
                 handler.post {
                     try { track?.stop() } catch (_: Exception) {}
                     try { track?.release() } catch (_: Exception) {}
@@ -138,6 +150,26 @@ class SrtCodecPlayer {
     }
 
     /**
+     * Bitstream icin digital_raw=1 yapar ve onceki degeri saklar.
+     * Onceki deger 1 ise (baska bir uygulama/kullanici zaten raw modda)
+     * cikista tekrar 1'e donulur; boylece disaridan yapilmis ayar bozulmaz.
+     */
+    private fun applyRawMode() {
+        rawPrevious = AmlogicRawAudio.readRawMode()
+        AmlogicRawAudio.setRawMode(true)
+        Log.i(TAG, "raw mod acildi (onceki digital_raw=$rawPrevious)")
+    }
+
+    /** digital_raw'i bizim buldugumuz degerine dondurur. */
+    private fun restoreRawMode() {
+        if (rawPrevious < 0) return
+        val target = rawPrevious
+        rawPrevious = -1
+        AmlogicRawAudio.setRawMode(target != 0)
+        Log.i(TAG, "raw mod geri alindi (digital_raw=$target)")
+    }
+
+    /**
      * Root fallback: Amlogic /dev/audiodsp0 raw node.
      * Offload AudioTrack kapali kutularda kullanilir.
      */
@@ -145,9 +177,7 @@ class SrtCodecPlayer {
         try {
             File("/sys/class/amaudio/output_enable").writeText("1\n")
         } catch (_: Exception) {}
-        try {
-            File("/sys/class/audiodsp/digital_raw").writeText("1\n")
-        } catch (_: Exception) {}
+        applyRawMode()
 
         running = true
         val buf = ByteArray(1024 * 1024)
@@ -169,6 +199,7 @@ class SrtCodecPlayer {
                 Log.e(TAG, "raw passthrough /dev/audiodsp0: ${e.message}")
             } finally {
                 running = false
+                restoreRawMode()
             }
         }
     }
@@ -199,6 +230,10 @@ class SrtCodecPlayer {
     /** FFmpeg decode -> s16 PCM -> AudioTrack. */
     fun start() {
         if (running) return
+
+        // PCM yolu: onceki oturumdan raw mod kalmis olabilir, kapat.
+        restoreRawMode()
+        AmlogicRawAudio.setRawMode(false)
 
         val rate = CodecBridge.nativeAudioRate().let { if (it <= 0) 48000 else it }
         val ch = CodecBridge.nativeAudioChannels().let { if (it <= 0) 2 else it }
