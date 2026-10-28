@@ -395,15 +395,24 @@ int openSrt(const char* url) {
     fmt->interrupt_callback.callback = interruptCallback;
     fmt->interrupt_callback.opaque = &g_state;
 
+    // ONEMLI: interruptCallback, running=false gorurse acmayi AVERROR_EXIT ile
+    // iptal eder. closeAll() running'i false yaptigi icin avformat_open_input
+    // cagrisindan ONCE true yapilmalidir; aksi halde her acilis "Immediate exit
+    // requested" ile basarisiz olur.
+    g_state.running.store(true);
+
     int r = avformat_open_input(&fmt, url, nullptr, nullptr);
     if (r < 0) {
+        g_state.running.store(false);
         char err[AV_ERROR_MAX_STRING_SIZE] = {0};
         av_strerror(r, err, sizeof(err));
         LOGE("open fail (%s): %s", url, err);
+        avformat_close_input(&fmt);
         return r;
     }
     r = avformat_find_stream_info(fmt, nullptr);
     if (r < 0) {
+        g_state.running.store(false);
         char err[AV_ERROR_MAX_STRING_SIZE] = {0};
         av_strerror(r, err, sizeof(err));
         LOGE("find_stream_info fail: %s", err);
