@@ -31,6 +31,7 @@ class CodecActivity : Activity() {
     private lateinit var btnStop: Button
     private lateinit var btnPass: Button
     private lateinit var btnDvb: Button
+    private lateinit var btnProbe: Button
 
     private var usePass = true
     private var surface: Surface? = null
@@ -101,10 +102,16 @@ class CodecActivity : Activity() {
             setOnClickListener { onPlayDvb() }
         }
 
+        btnProbe = Button(this).apply {
+            text = "Kodek testi"
+            setOnClickListener { tvStatus.text = "Sistem kodekleri:\n" + CodecProbe.report() }
+        }
+
         row.addView(btnPlay)
         row.addView(btnStop)
         row.addView(btnPass)
         row.addView(btnDvb)
+        row.addView(btnProbe)
         panel.addView(row)
 
         val root = FrameLayout(this)
@@ -183,7 +190,17 @@ class CodecActivity : Activity() {
             ui.post {
                 if (isFinishing) return@post
                 if (!ok) {
-                    tvStatus.text = "TV: kilit yok / akis gelmedi (11767 V $sr)"
+                    // Bu imajda tuner yalnizca kutu uygulamasina acik
+                    // (FE_SET_FRONTEND desteklenmiyor). Kutunun TV
+                    // uygulamasini ac; orada ses PCM olarak calisiyor.
+                    val launched = launchVendorTv()
+                    tvStatus.text = audioStatus(
+                        if (launched) {
+                            "Bu kutuda tuner kutu uygulamasina kilitli; TV uygulamasi acildi."
+                        } else {
+                            "TV acilamadi (tuner bu uygulamaya kapali)."
+                        }
+                    )
                     btnPlay.isEnabled = true
                     btnDvb.isEnabled = true
                     btnStop.isEnabled = false
@@ -195,6 +212,21 @@ class CodecActivity : Activity() {
                 ui.post(statusTick)
             }
         }.start()
+    }
+
+    /** Kutunun kendi DVB oynaticisini acar. */
+    private fun launchVendorTv(): Boolean {
+        val pkgs = listOf("com.amlogic.DVBPlayer", "com.droidlogic.DVBPlayer")
+        for (p in pkgs) {
+            val i = packageManager.getLaunchIntentForPackage(p) ?: continue
+            try {
+                startActivity(i)
+                return true
+            } catch (e: Exception) {
+                android.util.Log.e("S912Codec", "TV uygulamasi acilamadi ($p): ${e.message}")
+            }
+        }
+        return false
     }
 
     private fun onPlay() {
